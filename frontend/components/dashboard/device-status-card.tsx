@@ -11,7 +11,21 @@ interface DeviceStatusCardProps {
 }
 
 export function DeviceStatusCard({ device }: DeviceStatusCardProps) {
-  const DeviceIcon = Icons[device.type];
+  // Lấy icon dựa trên type hoặc roomType, mặc định là cb
+  const getDeviceIcon = () => {
+    // Nếu có roomType, ưu tiên dùng icon phòng
+    if (device.roomType && Icons[device.roomType as keyof typeof Icons]) {
+      return Icons[device.roomType as keyof typeof Icons];
+    }
+    // Nếu type là cb hoặc circuit_breaker
+    if (device.type === "cb" || device.type === "circuit_breaker") {
+      return Icons.cb;
+    }
+    // Fallback theo type
+    return Icons[device.type as keyof typeof Icons] || Icons.cb;
+  };
+
+  const DeviceIcon = getDeviceIcon();
 
   return (
     <Card className="overflow-hidden hover:shadow-lg transition-shadow">

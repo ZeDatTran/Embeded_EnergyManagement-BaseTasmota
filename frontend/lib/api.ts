@@ -6,7 +6,7 @@ import { aggregateEnergyDataByDay } from "./utils";
 export interface Device {
   id: string;
   name: string;
-  type: "light" | "fan" | "ac" | "sensor" | "camera";
+  type: "light" | "fan" | "ac" | "sensor" | "camera" | "cb" | "circuit_breaker";
   status: "online" | "offline";
   isOn: boolean;
   location: string;
@@ -17,6 +17,28 @@ export interface Device {
   energyToday?: number; // kWh
   energyTotal?: number; // kWh
   powerFactor?: number; // power factor
+  // CB specific fields
+  roomType?: string;
+  roomName?: string;
+  floor?: number;
+  maxLoad?: number;
+}
+
+export interface CircuitBreakerInput {
+  deviceId: string;
+  name: string;
+  roomType: string;
+  roomName: string;
+  floor?: number;
+  maxLoad?: number;
+}
+
+export interface AvailableDevice {
+  id: string;
+  name: string;
+  type: string;
+  isConfigured: boolean;
+  configuredAs?: string;
 }
 
 export interface Alert {
@@ -44,6 +66,111 @@ export interface EnergyData {
   cost: number;
 }
 
+export interface EnergySummaryData {
+  totalConsumption: number;
+  totalCost: number;
+}
+
+export interface EnergyBudgetProfile {
+  id: string;
+  month_key: string;
+  target_bill_vnd: number;
+  warning_threshold_percent: number;
+  optimization_mode: "manual" | "assisted" | "automatic";
+  auto_apply_recommendations: number;
+  target_kwh_month?: number;
+  current_spent_vnd?: number;
+  current_consumed_kwh?: number;
+  latest_forecast_bill_vnd?: number;
+  latest_forecast_kwh_month?: number;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BudgetAnalysisDevice {
+  deviceId: string;
+  deviceName: string;
+  totalKwh?: number;
+  avgPowerW?: number;
+  energyKwh?: number;
+  priority?: string;
+  autoControllable?: boolean;
+}
+
+export interface BudgetAnalysis {
+  monthKey: string;
+  actualConsumedKwhMonth: number;
+  actualSpentVndMonth: number;
+  forecastKwhMonth: number;
+  forecastBillVnd: number;
+  targetBillVnd: number;
+  targetKwhMonth: number;
+  overrunVnd: number;
+  requiredReductionKwh: number;
+  daysInMonth: number;
+  elapsedDays: number;
+  remainingDaysInMonth: number;
+  avgDailyKwh: number;
+  recentAvgDailyKwh: number;
+  budgetConfigured: boolean;
+  topConsumers: BudgetAnalysisDevice[];
+  topFlexibleConsumers: BudgetAnalysisDevice[];
+}
+
+export interface RecommendationAction {
+  id: string;
+  run_id: string;
+  device_id: string;
+  action_type: string;
+  proposed_action: "on" | "off";
+  proposed_start: string;
+  proposed_end?: string | null;
+  proposed_duration_minutes: number;
+  estimated_energy_saved_kwh: number;
+  estimated_cost_saved_vnd: number;
+  comfort_impact_score: number;
+  saving_score: number;
+  confidence_score: number;
+  priority_score: number;
+  reason_code: string;
+  reason_text?: string;
+  approval_status: string;
+  mapped_schedule_id?: string | null;
+  deviceName?: string;
+}
+
+export interface RecommendationRun {
+  id: string;
+  budget_profile_id: string;
+  month_key: string;
+  generated_at: string;
+  generated_by: string;
+  run_type: string;
+  planning_horizon_days: number;
+  strategy: string;
+  baseline_forecast_bill_vnd: number;
+  optimized_forecast_bill_vnd?: number;
+  baseline_forecast_kwh: number;
+  optimized_forecast_kwh?: number;
+  required_bill_reduction_vnd: number;
+  required_kwh_reduction: number;
+  achieved_kwh_reduction_estimate: number;
+  status: string;
+}
+
+export interface GeneratedEnergyPlan {
+  run: RecommendationRun;
+  analysis: BudgetAnalysis;
+  actions: RecommendationAction[];
+  summary: {
+    horizonTargetReductionKwh: number;
+    estimatedReductionKwh: number;
+    estimatedReductionVnd: number;
+    message: string;
+  };
+}
+
 // API functions
 export async function fetchDevices(): Promise<Device[]> {
   try {
@@ -65,8 +192,8 @@ export async function fetchDevices(): Promise<Device[]> {
 
         return {
           id: deviceId,
-          name: metadata.name || deviceData.name || `Smart Device ${index + 1}`,
-          type: metadata.type || deviceData.type || "sensor",
+          name: metadata.name || deviceData.name || `CB ${index + 1}`,
+          type: metadata.type || deviceData.type || "cb",
           status: status as "online" | "offline",
           isOn,
           location: metadata.location || deviceData.location || "",
@@ -77,6 +204,11 @@ export async function fetchDevices(): Promise<Device[]> {
           energyToday: parseFloat(telemetry["ENERGY-Today"] || "0"),
           energyTotal: parseFloat(telemetry["ENERGY-Total"] || "0"),
           powerFactor: parseFloat(telemetry["ENERGY-Factor"] || "0"),
+          // CB specific fields
+          roomType: metadata.room_type || deviceData.roomType,
+          roomName: metadata.room_name || deviceData.roomName,
+          floor: metadata.floor || deviceData.floor,
+          maxLoad: metadata.max_load || deviceData.maxLoad || 32,
         };
       });
     }
@@ -84,6 +216,24 @@ export async function fetchDevices(): Promise<Device[]> {
     return [];
   } catch (error) {
     console.error("Error fetching devices:", error);
+    return [];
+  }
+}
+
+// Fetch available devices from CoreIoT for adding new CB
+export async function fetchAvailableDevices(): Promise<AvailableDevice[]> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/devices/available`);
+    if (!response.ok) throw new Error("Failed to fetch available devices");
+    const result = await response.json();
+
+    if (result.status === "success" && result.data) {
+      return result.data as AvailableDevice[];
+    }
+
+    return [];
+  } catch (error) {
+    console.error("Error fetching available devices:", error);
     return [];
   }
 }
@@ -131,6 +281,89 @@ export async function fetchEnergyData(
   }
 }
 
+export async function fetchEnergySummary(
+  period: "day" | "week" | "month" = "month"
+): Promise<EnergySummaryData | null> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/energy/summary?period=${period}`);
+    if (!response.ok) throw new Error("Failed to fetch energy summary");
+
+    const result = await response.json();
+    if (result?.status === "success" && result?.data) {
+      return result.data as EnergySummaryData;
+    }
+    return null;
+  } catch (error) {
+    console.error("Error fetching energy summary:", error);
+    return null;
+  }
+}
+
+// Add new Circuit Breaker
+export async function addCircuitBreaker(
+  cbData: CircuitBreakerInput
+): Promise<{ success: boolean; message?: string; device?: Device }> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/devices/cb`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(cbData),
+    });
+
+    const result = await response.json();
+
+    if (!response.ok) {
+      return {
+        success: false,
+        message: result.message || "Không thể thêm CB",
+      };
+    }
+
+    return {
+      success: true,
+      message: "Thêm CB thành công",
+      device: result.device,
+    };
+  } catch (error) {
+    console.error("Error adding circuit breaker:", error);
+    return {
+      success: false,
+      message: "Lỗi kết nối server",
+    };
+  }
+}
+
+// Delete Circuit Breaker
+export async function deleteCircuitBreaker(
+  deviceId: string
+): Promise<{ success: boolean; message?: string }> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/devices/cb/${deviceId}`, {
+      method: "DELETE",
+    });
+
+    const result = await response.json();
+
+    if (!response.ok) {
+      return {
+        success: false,
+        message: result.message || "Không thể xóa CB",
+      };
+    }
+
+    return {
+      success: true,
+      message: "Xóa CB thành công",
+    };
+  } catch (error) {
+    console.error("Error deleting circuit breaker:", error);
+    return {
+      success: false,
+      message: "Lỗi kết nối server",
+    };
+  }
+}
+
 function getMockLogs(): ActivityLog[] {
   return [
     {
@@ -157,4 +390,101 @@ function getMockLogs(): ActivityLog[] {
       details: "Bật đèn lúc 18:00",
     },
   ];
+}
+
+export async function fetchCurrentBudget(monthKey?: string): Promise<{ budget: EnergyBudgetProfile | null; analysis: BudgetAnalysis }> {
+  const query = monthKey ? `?monthKey=${monthKey}` : "";
+  const response = await fetch(`${API_BASE_URL}/energy-budget/current${query}`);
+  if (!response.ok) throw new Error("Failed to fetch current budget");
+  const result = await response.json();
+  return result.data;
+}
+
+export async function saveCurrentBudget(input: {
+  monthKey?: string;
+  targetBillVnd: number;
+  warningThresholdPercent: number;
+  optimizationMode: "manual" | "assisted" | "automatic";
+  autoApplyRecommendations: boolean;
+}): Promise<{ budget: EnergyBudgetProfile; analysis: BudgetAnalysis }> {
+  const response = await fetch(`${API_BASE_URL}/energy-budget/current`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.message || "Failed to save budget");
+  return result.data;
+}
+
+export async function fetchBudgetHistory(): Promise<EnergyBudgetProfile[]> {
+  const response = await fetch(`${API_BASE_URL}/energy-budget/history`);
+  if (!response.ok) throw new Error("Failed to fetch budget history");
+  const result = await response.json();
+  return result.data || [];
+}
+
+export async function fetchEnergyPlanAnalysis(monthKey?: string): Promise<BudgetAnalysis> {
+  const query = monthKey ? `?monthKey=${monthKey}` : "";
+  const response = await fetch(`${API_BASE_URL}/energy-plan/analysis/current${query}`);
+  if (!response.ok) throw new Error("Failed to fetch energy plan analysis");
+  const result = await response.json();
+  return result.data;
+}
+
+export async function fetchEnergyPlanDevices(): Promise<BudgetAnalysisDevice[]> {
+  const response = await fetch(`${API_BASE_URL}/energy-plan/analysis/devices`);
+  if (!response.ok) throw new Error("Failed to fetch device analysis");
+  const result = await response.json();
+  return result.data || [];
+}
+
+export async function generateEnergyPlan(input: {
+  monthKey?: string;
+  planningHorizonDays: number;
+  strategy: "conservative" | "balanced" | "aggressive";
+}): Promise<GeneratedEnergyPlan> {
+  const response = await fetch(`${API_BASE_URL}/energy-plan/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.message || "Failed to generate energy plan");
+  return result.data;
+}
+
+export async function fetchRecommendationRuns(limit = 20): Promise<RecommendationRun[]> {
+  const response = await fetch(`${API_BASE_URL}/energy-plan/runs?limit=${limit}`);
+  if (!response.ok) throw new Error("Failed to fetch recommendation runs");
+  const result = await response.json();
+  return result.data || [];
+}
+
+export async function fetchRecommendationActions(runId: string): Promise<RecommendationAction[]> {
+  const response = await fetch(`${API_BASE_URL}/energy-plan/runs/${runId}/actions`);
+  if (!response.ok) throw new Error("Failed to fetch recommendation actions");
+  const result = await response.json();
+  return result.data || [];
+}
+
+export async function approveRecommendationAction(actionId: string): Promise<RecommendationAction> {
+  const response = await fetch(`${API_BASE_URL}/energy-plan/actions/${actionId}/approve`, { method: "POST" });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.message || "Failed to approve action");
+  return result.data;
+}
+
+export async function rejectRecommendationAction(actionId: string): Promise<RecommendationAction> {
+  const response = await fetch(`${API_BASE_URL}/energy-plan/actions/${actionId}/reject`, { method: "POST" });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.message || "Failed to reject action");
+  return result.data;
+}
+
+export async function applyRecommendationRun(runId: string): Promise<{ runId: string; createdSchedulesCount: number; createdScheduleIds: string[] }> {
+  const response = await fetch(`${API_BASE_URL}/energy-plan/runs/${runId}/apply`, { method: "POST" });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.message || "Failed to apply recommendation run");
+  return result.data;
 }

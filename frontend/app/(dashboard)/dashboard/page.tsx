@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { StatCard } from "@/components/dashboard/stat-card";
 import { DeviceStatusCard } from "@/components/dashboard/device-status-card";
+import { AddCBDialog } from "@/components/dashboard/add-cb-dialog";
 import { Icons } from "@/components/icons";
 import { fetchDevices, controlAllDevices, type Device } from "@/lib/api"
 import { Button } from "@/components/ui/button"
@@ -171,15 +172,15 @@ export default function DashboardPage() {
       {/* Page header */}
       <div>
         <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">Dashboard</h1>
-        <p className="text-sm sm:text-base text-muted-foreground">Tổng quan hệ thống IoT của bạn</p>
+        <p className="text-sm sm:text-base text-muted-foreground">Quản lý CB tổng theo phòng</p>
       </div>
 
       {/* Stats grid */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard
-          title="Tổng thiết bị"
+          title="Tổng CB"
           value={devices.length}
-          icon={<Icons.devices className="h-6 w-6 text-blue-500" />}
+          icon={<Icons.cb className="h-6 w-6 text-blue-500" />}
         />
         <StatCard
           title="Đang hoạt động"
@@ -220,18 +221,21 @@ export default function DashboardPage() {
         </Button>
       </div>
 
-      {/* Devices overview - now full width */}
+      {/* CB overview - now full width */}
       <div className="space-y-4">
         <div className="flex items-center justify-between">
-          <h2 className="text-xl font-semibold">Thiết bị của bạn</h2>
-          <span className="text-sm text-muted-foreground">
-            {devices.length} thiết bị
-          </span>
+          <h2 className="text-xl font-semibold">CB Tổng theo phòng</h2>
+          <div className="flex items-center gap-3">
+            <AddCBDialog onSuccess={() => loadDevices(false)} />
+            <span className="text-sm text-muted-foreground">
+              {devices.length} CB
+            </span>
+          </div>
         </div>
         <div className="grid gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
           {devices.length === 0 && (
             <div className="col-span-full text-center py-8 text-muted-foreground">
-              Chưa có thiết bị nào
+              Chưa có CB nào. Nhấn "Thêm CB mới" để bắt đầu.
             </div>
           )}
           {devices.map((device) => (

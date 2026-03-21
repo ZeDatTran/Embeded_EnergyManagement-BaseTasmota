@@ -29,6 +29,13 @@ import {
   BarChart3,
   TrendingUp,
   TrendingDown,
+  CircuitBoard,
+  DoorOpen,
+  Bed,
+  Sofa,
+  UtensilsCrossed,
+  Bath,
+  Building2,
 } from "lucide-react"
 
 export const Icons = {
@@ -38,6 +45,16 @@ export const Icons = {
   ac: AirVent,
   sensor: Thermometer,
   camera: Camera,
+  
+  // Circuit Breaker / Room types
+  cb: CircuitBoard,
+  circuit_breaker: CircuitBoard,
+  living_room: Sofa,
+  bedroom: Bed,
+  office: Building2,
+  kitchen: UtensilsCrossed,
+  bathroom: Bath,
+  balcony: DoorOpen,
 
   // Status
   power: Power,

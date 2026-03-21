@@ -19,8 +19,8 @@ interface ThresholdAlertProps {
 }
 
 export function ThresholdAlert({ currentAmps, deviceName }: ThresholdAlertProps) {
-  const [enabled, setEnabled] = useState(true)
-  const [threshold, setThreshold] = useState("0.5")
+  const [enabled, setEnabled] = useState(false)
+  const [threshold, setThreshold] = useState("20")
   const [isEditing, setIsEditing] = useState(false)
   const { socket, isConnected } = useSocket()
   const { toast } = useToast()
@@ -35,7 +35,16 @@ export function ThresholdAlert({ currentAmps, deviceName }: ThresholdAlertProps)
     if (savedThreshold) {
       setThreshold(savedThreshold)
     }
+
+    const savedEnabled = localStorage.getItem("threshold_enabled")
+    if (savedEnabled !== null) {
+      setEnabled(savedEnabled === "true")
+    }
   }, [deviceName])
+
+  useEffect(() => {
+    localStorage.setItem("threshold_enabled", enabled.toString())
+  }, [enabled])
 
   const handleSaveThreshold = () => {
     if (!socket || !isConnected) {

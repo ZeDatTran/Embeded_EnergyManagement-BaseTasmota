@@ -8,6 +8,7 @@ interface ForecastData {
     tien_can_tra_vnd: number
     tong_kwh_du_doan_duoc: number
     tong_kwh_ca_thang: number
+    kwh_da_tieu_thu_thang_nay?: number
 }
 
 const AI_SERVER_URL = "http://localhost:5000"
@@ -18,17 +19,35 @@ export function AIPredictEnergy() {
     const [isForecasting, setIsForecasting] = useState(false)
     const [forecastStatus, setForecastStatus] = useState<string>("")
 
-    // Kiểm tra xem trong session có dữ liệu cũ không
+    // Ưu tiên lấy dữ liệu mới nhất từ server; cache chỉ dùng làm fallback.
     useEffect(() => {
-        const saved = sessionStorage.getItem(STORAGE_KEY)
-        if (saved) {
+        const loadLatestSummary = async () => {
             try {
-                setForecastData(JSON.parse(saved))
-                setForecastStatus("Dữ liệu từ lần chạy gần nhất.")
+                const resSummary = await fetch(`${AI_SERVER_URL}/forecast/summary`)
+                const dataSummary = await resSummary.json()
+
+                if (resSummary.ok && dataSummary.status === "success") {
+                    setForecastData(dataSummary.data)
+                    setForecastStatus("Dữ liệu mới nhất từ server.")
+                    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(dataSummary.data))
+                    return
+                }
             } catch (e) {
-                console.error("Lỗi đọc cache", e)
+                console.error("Lỗi lấy summary mới nhất", e)
+            }
+
+            const saved = sessionStorage.getItem(STORAGE_KEY)
+            if (saved) {
+                try {
+                    setForecastData(JSON.parse(saved))
+                    setForecastStatus("Dữ liệu từ lần chạy gần nhất.")
+                } catch (e) {
+                    console.error("Lỗi đọc cache", e)
+                }
             }
         }
+
+        loadLatestSummary()
     }, [])
 
     const handleRunForecast = async () => {
@@ -128,6 +147,14 @@ export function AIPredictEnergy() {
                         </span>
                     </div>
                 </div>
+
+                {forecastData && (
+                    <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
+                        Đã tiêu thụ tháng này: {Number(forecastData.kwh_da_tieu_thu_thang_nay || 0).toFixed(2)} kWh | 
+                        Dự báo thêm: {forecastData.tong_kwh_du_doan_duoc.toFixed(2)} kWh | 
+                        Tổng tháng: {forecastData.tong_kwh_ca_thang.toFixed(2)} kWh
+                    </div>
+                )}
             </div>
         </div>
     )

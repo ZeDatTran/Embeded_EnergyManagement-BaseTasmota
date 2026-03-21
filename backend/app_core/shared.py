@@ -1,0 +1,442 @@
+import hashlib
+import json
+import logging
+import os
+import random
+import threading
+import time
+from collections import defaultdict
+from datetime import datetime, timedelta
+
+import requests
+from dotenv import load_dotenv
+
+from database import (
+    create_schedule,
+    delete_schedule,
+    get_all_schedules,
+    get_all_history,
+    get_enabled_schedules,
+    get_schedule_by_id,
+    list_plug_hourly_energy,
+    log_schedule_execution,
+    save_plug_hourly_energy,
+    update_schedule,
+)
+
+try:
+    from ml.websocket_forecast import forecast_client
+    from database import save_hourly_kwh
+
+    FORECAST_ENABLED = True
+except ImportError:
+    print("WARNING: ml/websocket_forecast.py not found. Running without forecast.")
+    FORECAST_ENABLED = False
+
+load_dotenv()
+
+CORE_IOT_URL = "https://app.coreiot.io"
+JWT_TOKEN = os.getenv("JWT_TOKEN")
+DEVICE_ID = os.getenv("DEVICE_ID")
+GROUP_ID = os.getenv("GROUP_ID")
+HEADERS = {"Authorization": f"Bearer {JWT_TOKEN}"}
+
+if not all([JWT_TOKEN, DEVICE_ID, GROUP_ID]):
+    raise ValueError("JWT_TOKEN, DEVICE_ID and GROUP_ID must be set in .env file")
+
+log_dir = "logs"
+os.makedirs(log_dir, exist_ok=True)
+
+logging.basicConfig(
+    filename=os.path.join(log_dir, "telemetry.log"),
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
+
+TELEMETRY_KEYS = [
+    "ENERGY-Voltage",
+    "ENERGY-Current",
+    "ENERGY-Power",
+    "ENERGY-Today",
+    "ENERGY-Total",
+    "ENERGY-Factor",
+]
+
+DEVICE_TYPES = ["light", "fan", "ac", "sensor", "camera", "cb", "circuit_breaker"]
+DEVICE_LOCATIONS = ["Phòng khách", "Phòng ngủ", "Phòng làm việc", "Phòng ăn", "Ban công"]
+DEVICE_NAME_MAP = {
+    "light": "Đèn thông minh",
+    "fan": "Quạt máy",
+    "ac": "Điều hòa",
+    "sensor": "Cảm biến",
+    "camera": "Camera",
+    "cb": "CB Tổng",
+    "circuit_breaker": "CB Tổng",
+}
+ROOM_TYPE_MAP = {
+    "living_room": "Phòng khách",
+    "bedroom": "Phòng ngủ",
+    "office": "Phòng làm việc",
+    "kitchen": "Nhà bếp",
+    "bathroom": "Phòng tắm",
+    "balcony": "Ban công",
+    "custom": "Tùy chỉnh",
+}
+DAY_MAP = {"Mon": 0, "Tue": 1, "Wed": 2, "Thu": 3, "Fri": 4, "Sat": 5, "Sun": 6}
+
+latest_data = {}
+subscription_to_device_map = {}
+DEVICE_METADATA_CACHE = {}
+CUSTOM_CB_DEVICES = {}
+client_thresholds = {}
+
+
+def get_tracked_device_ids() -> list[str]:
+    """Return device IDs explicitly configured by users."""
+    return list(CUSTOM_CB_DEVICES.keys())
+
+if FORECAST_ENABLED:
+    previous_energy = {}
+    hourly_kwh_global = {}
+    predicted_details_cache = {}
+    lock = threading.Lock()
+
+    def process_new_energy(device_id, total_energy_str, ts_iso):
+        """Calculate hourly kWh from ENERGY-Total and save to DB."""
+        global hourly_kwh_global, previous_energy
+        try:
+            total_energy = float(total_energy_str)
+            ts = datetime.fromisoformat(ts_iso.replace("Z", "+00:00")).replace(tzinfo=None)
+        except Exception:
+            return
+
+        with lock:
+            key = ts.strftime("%Y-%m-%dT%H:00:00")
+            prev = previous_energy.get(device_id)
+
+            if prev:
+                prev_ts, prev_val = prev
+                if prev_ts.hour != ts.hour or prev_ts.date() != ts.date():
+                    delta = total_energy - prev_val
+                    if delta < 0:
+                        delta = total_energy
+
+                    hourly_kwh_global[key] = hourly_kwh_global.get(key, 0.0) + round(delta, 4)
+                    save_hourly_kwh(key, hourly_kwh_global[key])
+                    save_plug_hourly_energy(device_id, key, round(delta, 4), source="coreiot")
+
+                    if key in predicted_details_cache:
+                        forecast_client.send_feedback(
+                            {key: predicted_details_cache[key]},
+                            {key: hourly_kwh_global[key]},
+                        )
+                        del predicted_details_cache[key]
+
+            previous_energy[device_id] = (ts, total_energy)
+
+    def load_hourly_kwh_from_db():
+        """Load persisted hourly consumption to in-memory cache (real data only)."""
+        logging.info("Loading hourly_kwh history from database...")
+        loaded = 0
+        backfilled = 0
+        with lock:
+            hourly_kwh_global.clear()
+            history = get_all_history()
+            for ts, kwh in history.items():
+                try:
+                    hourly_kwh_global[ts] = float(kwh)
+                    loaded += 1
+                except (TypeError, ValueError):
+                    continue
+
+            # Backfill from per-plug hourly table when hourly_kwh is sparse.
+            plug_rows = list_plug_hourly_energy()
+            by_hour = defaultdict(float)
+            for row in plug_rows:
+                hour_bucket = row.get("hour_bucket")
+                energy_kwh = row.get("energy_kwh")
+                if not hour_bucket:
+                    continue
+                try:
+                    by_hour[hour_bucket] += float(energy_kwh or 0.0)
+                except (TypeError, ValueError):
+                    continue
+
+            for hour_bucket, total_kwh in by_hour.items():
+                # Prefer aggregated real plug data when present.
+                hourly_kwh_global[hour_bucket] = round(max(0.0, total_kwh), 6)
+                backfilled += 1
+
+        logging.info("Loaded %s hourly_kwh records from database.", loaded)
+        logging.info("Backfilled %s hourly records from plug_hourly_energy.", backfilled)
+
+
+def get_or_assign_metadata(device_id):
+    """Assign deterministic metadata for one device ID and cache it."""
+    global DEVICE_METADATA_CACHE
+
+    if device_id in DEVICE_METADATA_CACHE:
+        return DEVICE_METADATA_CACHE[device_id]
+
+    hash_object = hashlib.md5(device_id.encode())
+    hash_int = int(hash_object.hexdigest(), 16)
+    loc_idx = hash_int % len(DEVICE_LOCATIONS)
+
+    device_type = "cb"
+    device_location = DEVICE_LOCATIONS[loc_idx]
+    device_name = f"CB {device_location}"
+
+    room_type = "custom"
+    for key, value in ROOM_TYPE_MAP.items():
+        if value == device_location:
+            room_type = key
+            break
+
+    metadata = {
+        "type": device_type,
+        "name": device_name,
+        "location": device_location,
+        "room_type": room_type,
+        "room_name": device_location,
+        "max_load": 32,
+    }
+    DEVICE_METADATA_CACHE[device_id] = metadata
+    logging.info(f"CB Metadata Assigned: {device_id} -> {device_name} ({device_location})")
+
+    return metadata
+
+
+def verify_token():
+    """Verify JWT token validity."""
+    try:
+        response = requests.get(f"{CORE_IOT_URL}/api/auth/user", headers=HEADERS, timeout=10)
+        response.raise_for_status()
+        logging.info("JWT_TOKEN is valid")
+        return True
+    except requests.RequestException as e:
+        logging.error(
+            "Invalid JWT_TOKEN: %s, Status Code: %s",
+            e,
+            getattr(e.response, "status_code", "N/A"),
+        )
+        return False
+
+
+def get_devices_from_group():
+    """Get all devices from group with fallback."""
+    try:
+        url = f"{CORE_IOT_URL}/api/tenant/devices?pageSize=100&page=0&groupId={GROUP_ID}"
+        response = requests.get(url, headers=HEADERS, timeout=15)
+        response.raise_for_status()
+        devices_data = response.json().get("data", [])
+
+        if not isinstance(devices_data, list):
+            logging.warning(
+                "Expected list from /api/tenant/devices but got %s. Fallback.",
+                type(devices_data),
+            )
+            raise requests.RequestException("Invalid data format from group API")
+
+        device_ids = [device["id"]["id"] for device in devices_data]
+
+        if not device_ids:
+            logging.warning("No devices found in group %s. Checking fallback.", GROUP_ID)
+            raise requests.RequestException("No devices in group")
+
+        logging.info("Found %s devices in group %s", len(device_ids), GROUP_ID)
+        return device_ids
+
+    except requests.RequestException as e:
+        logging.error("Error fetching devices from group %s: %s", GROUP_ID, e)
+        try:
+            response = requests.get(
+                f"{CORE_IOT_URL}/api/tenant/devices?pageSize=100&page=0",
+                headers=HEADERS,
+                timeout=15,
+            )
+            response.raise_for_status()
+            devices = response.json()["data"]
+            device_ids = [device["id"]["id"] for device in devices]
+            logging.info("Fallback: Found %s devices in tenant", len(device_ids))
+            return device_ids
+        except requests.RequestException as e_fallback:
+            logging.error("Error fetching tenant devices (fallback): %s", e_fallback)
+            logging.warning("Fallback: Using default DEVICE_ID %s", DEVICE_ID)
+            return [DEVICE_ID]
+
+
+def get_device_telemetry(device_id):
+    """Fetch one snapshot telemetry and update local cache."""
+    try:
+        response = requests.get(
+            (
+                f"{CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/"
+                f"values/timeseries?keys={','.join(TELEMETRY_KEYS)}&limit=1"
+            ),
+            headers=HEADERS,
+            timeout=15,
+        )
+        response.raise_for_status()
+        telemetry = response.json()
+
+        if device_id not in latest_data:
+            metadata = get_or_assign_metadata(device_id)
+            latest_data[device_id] = {
+                "telemetry": {},
+                "attributes": {"POWER": "N/A"},
+                "metadata": metadata,
+            }
+
+        parsed_telemetry = {}
+        for key, value_list in telemetry.items():
+            if value_list and isinstance(value_list, list) and value_list[0] and "value" in value_list[0]:
+                parsed_telemetry[key] = value_list[0]["value"]
+            else:
+                parsed_telemetry[key] = "N/A"
+
+        latest_data[device_id]["telemetry"].update(parsed_telemetry)
+
+        hour_bucket = datetime.now().replace(minute=0, second=0, microsecond=0).isoformat()
+        try:
+            power_w = float(parsed_telemetry.get("ENERGY-Power") or 0)
+            current_a = float(parsed_telemetry.get("ENERGY-Current") or 0)
+            voltage_v = float(parsed_telemetry.get("ENERGY-Voltage") or 0)
+            # Polling interval is ~10 seconds in periodic_data_logger.
+            # Energy per sample (kWh) = W * seconds / (1000 * 3600).
+            estimated_kwh = max(0.0, power_w) * 10.0 / (1000.0 * 3600.0)
+            save_plug_hourly_energy(
+                device_id=device_id,
+                hour_bucket=hour_bucket,
+                energy_kwh=estimated_kwh,
+                power_avg_w=power_w,
+                current_avg_a=current_a,
+                voltage_avg_v=voltage_v,
+                on_minutes=0,
+                samples_count=1,
+                source="derived",
+            )
+        except (TypeError, ValueError):
+            pass
+
+        logging.info("Telemetry received for device %s: %s", device_id, parsed_telemetry)
+        return telemetry
+
+    except requests.RequestException as e:
+        logging.error("Error fetching telemetry for device %s: %s", device_id, e)
+        return {}
+    except json.JSONDecodeError:
+        logging.error("Failed to decode JSON telemetry for device %s", device_id)
+        return {}
+
+
+def get_device_attributes(device_id):
+    """Fetch device attributes (POWER state)."""
+    try:
+        response = requests.get(
+            f"{CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/values/attributes/CLIENT_SCOPE",
+            headers=HEADERS,
+            timeout=15,
+        )
+        response.raise_for_status()
+        attributes = response.json()
+        power_attr = next((attr for attr in attributes if attr["key"] == "POWER"), {"value": "N/A"})
+
+        if device_id not in latest_data:
+            metadata = get_or_assign_metadata(device_id)
+            latest_data[device_id] = {
+                "telemetry": {},
+                "attributes": {"POWER": "N/A"},
+                "metadata": metadata,
+            }
+
+        latest_data[device_id]["attributes"]["POWER"] = power_attr["value"]
+        logging.info("POWER attribute received for device %s: %s", device_id, power_attr["value"])
+        return attributes
+    except requests.RequestException as e:
+        logging.error("Error fetching attributes for device %s: %s", device_id, e)
+        return []
+    except json.JSONDecodeError:
+        logging.error("Failed to decode JSON attributes for device %s", device_id)
+        return []
+
+
+def send_rpc_to_device(device_id, command, retries=3):
+    """Send RPC POWER command to one device."""
+    api_url = f"{CORE_IOT_URL}/api/rpc/oneway/{device_id}"
+    payload = {"method": "POWER", "params": command.upper()}
+
+    for attempt in range(retries):
+        try:
+            response = requests.post(api_url, headers=HEADERS, json=payload, timeout=15)
+            if response.status_code == 200:
+                logging.info("RPC '%s' sent to %s successfully.", command, device_id)
+                return True, {"status": "success", "device_id": device_id, "command_sent": command}
+            if response.status_code == 401:
+                logging.warning("401 error sending RPC to %s: Invalid token.", device_id)
+                return False, {"status": "error", "message": "Token (JWT) expired or invalid."}
+            logging.error("Error sending RPC to %s: %s - %s", device_id, response.status_code, response.text)
+            return False, {"status": "error", "message": response.text, "device_id": device_id}
+        except requests.exceptions.Timeout as e:
+            logging.warning("Timeout attempt %s/%s sending RPC to %s: %s", attempt + 1, retries, device_id, e)
+            if attempt < retries - 1:
+                time.sleep(2**attempt)
+            else:
+                logging.error("All %s attempts failed sending RPC to %s", retries, device_id)
+                return (
+                    False,
+                    {
+                        "status": "error",
+                        "message": "Device not responding. Please check connection.",
+                        "device_id": device_id,
+                    },
+                )
+        except requests.exceptions.RequestException as e:
+            logging.error("Connection error sending RPC to %s: %s", device_id, e)
+            return False, {"status": "error", "message": str(e), "device_id": device_id}
+
+
+def generate_mock_device_history(period):
+    """Generate mock history data as fallback when upstream fails."""
+    now = datetime.now()
+    history = []
+
+    if period == "week":
+        count = 168
+        interval_minutes = 60
+    elif period == "month":
+        count = 720
+        interval_minutes = 60
+    else:
+        count = 24
+        interval_minutes = 60
+
+    for i in range(count - 1, -1, -1):
+        timestamp = now - timedelta(minutes=i * interval_minutes)
+        hour = timestamp.hour
+
+        if 0 <= hour < 6:
+            base_power = 30
+        elif 6 <= hour < 9:
+            base_power = 150
+        elif 9 <= hour < 17:
+            base_power = 80
+        elif 17 <= hour < 22:
+            base_power = 200
+        else:
+            base_power = 50
+
+        power = base_power + random.uniform(-20, 20)
+        voltage = 220 + random.uniform(-5, 5)
+        current = power / voltage
+
+        history.append(
+            {
+                "timestamp": timestamp.isoformat(),
+                "power": round(max(0, power), 2),
+                "voltage": round(voltage, 1),
+                "current": round(max(0, current), 4),
+                "energy": round(max(0, power * (interval_minutes / 60) / 1000), 4),
+            }
+        )
+
+    return history

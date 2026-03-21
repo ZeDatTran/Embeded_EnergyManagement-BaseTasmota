@@ -6,7 +6,7 @@ import { EnergyStats } from "@/components/energy/energy-stats"
 import { ThresholdAlert } from "@/components/energy/threshold-alert"
 import { AIPredictEnergy } from "@/components/energy/AI-predict-energy"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { fetchEnergyData, type EnergyData } from "@/lib/api"
+import { fetchEnergyData, fetchEnergySummary, type EnergyData, type EnergySummaryData } from "@/lib/api"
 import { useSocket } from "@/context/SocketContext"
 
 interface DeviceCurrentData {
@@ -18,6 +18,7 @@ interface DeviceCurrentData {
 export default function EnergyPage() {
   const [period, setPeriod] = useState<"day" | "week" | "month">("day")
   const [data, setData] = useState<EnergyData[]>([])
+  const [summary, setSummary] = useState<EnergySummaryData | null>(null)
   const [loading, setLoading] = useState(true)
   // Track all devices' ENERGY-Current
   const [devicesCurrentData, setDevicesCurrentData] = useState<Map<string, DeviceCurrentData>>(new Map())
@@ -89,8 +90,12 @@ export default function EnergyPage() {
 
   const loadData = async () => {
     setLoading(true)
-    const energyData = await fetchEnergyData(period)
+    const [energyData, energySummary] = await Promise.all([
+      fetchEnergyData(period),
+      fetchEnergySummary(period),
+    ])
     setData(energyData)
+    setSummary(energySummary)
     setLoading(false)
   }
 
@@ -141,7 +146,7 @@ export default function EnergyPage() {
       </div>
 
       {/* Stats */}
-      <EnergyStats data={data} period={period} />
+      <EnergyStats data={data} period={period} summary={summary} />
 
       {/* Main content */}
       <div className="grid gap-6 lg:grid-cols-3">

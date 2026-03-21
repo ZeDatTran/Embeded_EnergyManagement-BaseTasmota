@@ -15,9 +15,14 @@ export default function DeviceDetailPage() {
   const params = useParams()
   const router = useRouter()
   const deviceId = params.deviceId as string
+  const [historyPeriod, setHistoryPeriod] = useState<"day" | "week" | "month" | "all">("day")
   
   const { data: device, isLoading, error } = useDevice(deviceId)
-  const { data: history, isLoading: historyLoading } = useDeviceHistory(deviceId)
+  const { data: history, isLoading: historyLoading } = useDeviceHistory(deviceId, historyPeriod, {
+    pageSize: 5000,
+    chunkDays: 3,
+    maxPages: 50,
+  })
   const { mutate: updateDevice, isPending } = useUpdateDevice()
   const [isToggling, setIsToggling] = useState(false)
 
@@ -171,6 +176,38 @@ export default function DeviceDetailPage() {
       </div>
 
       {/* Charts */}
+      <div className="flex items-center gap-2">
+        <span className="text-sm text-muted-foreground">Lịch sử:</span>
+        <Button
+          variant={historyPeriod === "day" ? "default" : "outline"}
+          size="sm"
+          onClick={() => setHistoryPeriod("day")}
+        >
+          24h
+        </Button>
+        <Button
+          variant={historyPeriod === "week" ? "default" : "outline"}
+          size="sm"
+          onClick={() => setHistoryPeriod("week")}
+        >
+          7 ngày
+        </Button>
+        <Button
+          variant={historyPeriod === "month" ? "default" : "outline"}
+          size="sm"
+          onClick={() => setHistoryPeriod("month")}
+        >
+          30 ngày
+        </Button>
+        <Button
+          variant={historyPeriod === "all" ? "default" : "outline"}
+          size="sm"
+          onClick={() => setHistoryPeriod("all")}
+        >
+          Toàn bộ
+        </Button>
+      </div>
+
       <Tabs defaultValue="power" className="w-full">
         <TabsList className="grid w-full grid-cols-4">
           <TabsTrigger value="power">Công suất</TabsTrigger>

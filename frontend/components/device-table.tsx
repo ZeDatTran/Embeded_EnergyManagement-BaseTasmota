@@ -2,7 +2,7 @@
 
 import { useDevices, useUpdateDevice } from "@/hooks/use-devices"
 import { useUIStore } from "@/lib/store"
-import { Power, Eye } from "lucide-react"
+import { Power, Eye, CircuitBoard } from "lucide-react"
 import { useState } from "react"
 import Link from "next/link"
 
@@ -30,26 +30,26 @@ export function DeviceTable() {
         <table className="w-full">
           <thead className="bg-gray-50 dark:bg-gray-700 border-b border-gray-200 dark:border-gray-600">
             <tr>
-              <th className="px-6 py-3 text-left text-sm font-semibold text-gray-900 dark:text-gray-100">Device Name</th>
-              <th className="px-6 py-3 text-left text-sm font-semibold text-gray-900 dark:text-gray-100">Area</th>
-              <th className="px-6 py-3 text-left text-sm font-semibold text-gray-900 dark:text-gray-100">Status</th>
-              <th className="px-6 py-3 text-left text-sm font-semibold text-gray-900 dark:text-gray-100">Power (W)</th>
-              <th className="px-6 py-3 text-left text-sm font-semibold text-gray-900 dark:text-gray-100">Voltage (V)</th>
-              <th className="px-6 py-3 text-left text-sm font-semibold text-gray-900 dark:text-gray-100">Current (A)</th>
-              <th className="px-6 py-3 text-left text-sm font-semibold text-gray-900 dark:text-gray-100">Actions</th>
+              <th className="px-6 py-3 text-left text-sm font-semibold text-gray-900 dark:text-gray-100">Tên CB</th>
+              <th className="px-6 py-3 text-left text-sm font-semibold text-gray-900 dark:text-gray-100">Vị trí</th>
+              <th className="px-6 py-3 text-left text-sm font-semibold text-gray-900 dark:text-gray-100">Trạng thái</th>
+              <th className="px-6 py-3 text-left text-sm font-semibold text-gray-900 dark:text-gray-100">Công suất (W)</th>
+              <th className="px-6 py-3 text-left text-sm font-semibold text-gray-900 dark:text-gray-100">Điện áp (V)</th>
+              <th className="px-6 py-3 text-left text-sm font-semibold text-gray-900 dark:text-gray-100">Dòng điện (A)</th>
+              <th className="px-6 py-3 text-left text-sm font-semibold text-gray-900 dark:text-gray-100">Thao tác</th>
             </tr>
           </thead>
           <tbody>
             {isLoading ? (
               <tr>
                 <td colSpan={7} className="px-6 py-8 text-center text-gray-500 dark:text-gray-400">
-                  Loading devices...
+                  Đang tải danh sách CB...
                 </td>
               </tr>
             ) : filteredDevices.length === 0 ? (
               <tr>
                 <td colSpan={7} className="px-6 py-8 text-center text-gray-500 dark:text-gray-400">
-                  No devices found
+                  Không tìm thấy CB nào
                 </td>
               </tr>
             ) : (
@@ -58,8 +58,9 @@ export function DeviceTable() {
                   <td className="px-6 py-4 text-sm font-medium text-gray-900 dark:text-gray-100">
                     <Link 
                       href={`/monitor/${device.id}`}
-                      className="hover:text-blue-600 dark:hover:text-blue-400 hover:underline"
+                      className="hover:text-blue-600 dark:hover:text-blue-400 hover:underline flex items-center gap-2"
                     >
+                      <CircuitBoard size={16} className="text-blue-500" />
                       {device.name}
                     </Link>
                   </td>

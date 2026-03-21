@@ -10,6 +10,7 @@ export interface Schedule {
   time: string
   days: string[]
   enabled: boolean
+  runOnce?: boolean
   createdAt: string
 }
 

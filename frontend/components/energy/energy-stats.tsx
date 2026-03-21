@@ -2,15 +2,20 @@ import { Card, CardContent } from "@/components/ui/card"
 import { Icons } from "@/components/icons"
 import { formatEnergy, formatCurrency } from "@/lib/utils"
 import type { EnergyData } from "@/lib/api"
+import type { EnergySummaryData } from "@/lib/api"
 
 interface EnergyStatsProps {
   data: EnergyData[]
   period: "day" | "week" | "month"
+  summary?: EnergySummaryData | null
 }
 
-export function EnergyStats({ data, period }: EnergyStatsProps) {
-  const totalConsumption = data.reduce((sum, item) => sum + item.consumption, 0)
-  const totalCost = data.reduce((sum, item) => sum + item.cost, 0)
+export function EnergyStats({ data, period, summary }: EnergyStatsProps) {
+  const chartTotalConsumption = data.reduce((sum, item) => sum + item.consumption, 0)
+  const chartTotalCost = data.reduce((sum, item) => sum + item.cost, 0)
+  const shouldUseSummary = (period === "day" || period === "month") && !!summary
+  const totalConsumption = shouldUseSummary ? (summary?.totalConsumption || 0) : chartTotalConsumption
+  const totalCost = shouldUseSummary ? (summary?.totalCost || 0) : chartTotalCost
   const avgConsumption = totalConsumption / data.length || 0
   const maxConsumption = Math.max(...data.map((item) => item.consumption), 0)
 

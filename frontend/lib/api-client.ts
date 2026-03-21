@@ -22,10 +22,20 @@ export interface DeviceTelemetry {
 
 export interface Device {
   type: string;
+  name?: string;
   location: string;
   id: string;
   attributes: DeviceAttributes;
   telemetry: DeviceTelemetry;
+  metadata?: {
+    type?: string;
+    name?: string;
+    location?: string;
+    room_type?: string;
+    room_name?: string;
+    max_load?: number;
+    floor?: number;
+  };
 }
 
 export interface DeviceCheckDataResponse {
@@ -254,82 +264,91 @@ export interface DeviceHistoryPoint {
   energy: number;
 }
 
-/**
- * Fetch device history data for charts
- * GET /device/<device_id>/history?period=day|week|month
- */
-export async function fetchDeviceHistory(
-  deviceId: string, 
-  period: string = 'day'
-): Promise<DeviceHistoryPoint[]> {
-  try {
-    const response = await fetch(
-      `${API_BASE_URL}/device/${deviceId}/history?period=${period}`,
-      {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      }
-    );
-
-    if (!response.ok) {
-      console.warn(`Device history API not available, using mock data`);
-      return generateMockHistory(period);
-    }
-
-    const data = await response.json();
-    return data.history || data || [];
-  } catch (error) {
-    console.error(`Error fetching device history for ${deviceId}:`, error);
-    // Return mock data for demo purposes
-    return generateMockHistory(period);
-  }
+export interface DeviceHistoryFetchOptions {
+  pageSize?: number;
+  chunkDays?: number;
+  startTs?: number;
+  maxPages?: number;
 }
 
 /**
- * Generate mock history data for demo/fallback
+ * Fetch device history data for charts.
+ * - day/week/month -> GET /device/<device_id>/history?period=<period>
+ * - all -> GET /device/<device_id>/history/full with cursor pagination
  */
-function generateMockHistory(period: string): DeviceHistoryPoint[] {
-  const now = new Date();
-  const points: DeviceHistoryPoint[] = [];
-  
-  let count = 24; // Default for day
-  let intervalMinutes = 60;
-  
-  if (period === 'week') {
-    count = 168; // 7 days * 24 hours
-    intervalMinutes = 60;
-  } else if (period === 'month') {
-    count = 720; // 30 days * 24 hours
-    intervalMinutes = 60;
-  }
+export async function fetchDeviceHistory(
+  deviceId: string,
+  period: string = 'day',
+  options: DeviceHistoryFetchOptions = {}
+): Promise<DeviceHistoryPoint[]> {
+  const normalizedPeriod = (period || 'day').toLowerCase();
 
-  for (let i = count - 1; i >= 0; i--) {
-    const timestamp = new Date(now.getTime() - i * intervalMinutes * 60 * 1000);
-    const hour = timestamp.getHours();
-    
-    // Generate realistic values based on time of day
-    let basePower = 50;
-    if (hour >= 6 && hour < 9) basePower = 150; // Morning
-    else if (hour >= 9 && hour < 17) basePower = 80; // Day
-    else if (hour >= 17 && hour < 22) basePower = 200; // Evening peak
-    else basePower = 30; // Night
-    
-    const power = basePower + (Math.random() - 0.5) * 40;
-    const voltage = 220 + (Math.random() - 0.5) * 10;
-    const current = power / voltage;
-    
-    points.push({
-      timestamp: timestamp.toISOString(),
-      power: Math.max(0, power),
-      voltage: voltage,
-      current: Math.max(0, current),
-      energy: Math.max(0, power * (intervalMinutes / 60) / 1000), // kWh
+  try {
+    if (normalizedPeriod === 'all') {
+      const pageSize = Math.max(1, Math.min(options.pageSize ?? 5000, 20000));
+      const chunkDays = Math.max(1, options.chunkDays ?? 3);
+      const maxPages = Math.max(1, options.maxPages ?? 50);
+
+      let cursor: number | undefined = options.startTs;
+      let hasMore = true;
+      let pageCount = 0;
+      const allPoints: DeviceHistoryPoint[] = [];
+
+      while (hasMore && pageCount < maxPages) {
+        const params = new URLSearchParams();
+        params.set('pageSize', String(pageSize));
+        params.set('chunkDays', String(chunkDays));
+        if (cursor !== undefined) {
+          params.set('cursor', String(cursor));
+        }
+
+        const response = await fetch(
+          `${API_BASE_URL}/device/${deviceId}/history/full?${params.toString()}`,
+          {
+            method: 'GET',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+          }
+        );
+
+        if (!response.ok) {
+          throw new Error(`Failed to fetch full history: ${response.status}`);
+        }
+
+        const data = await response.json();
+        const pagePoints = (data?.history || []) as DeviceHistoryPoint[];
+        allPoints.push(...pagePoints);
+
+        hasMore = Boolean(data?.hasMore);
+        cursor = typeof data?.nextCursor === 'number' ? data.nextCursor : undefined;
+        pageCount += 1;
+
+        if (hasMore && cursor === undefined) {
+          break;
+        }
+      }
+
+      return allPoints;
+    }
+
+    const response = await fetch(`${API_BASE_URL}/device/${deviceId}/history?period=${normalizedPeriod}`, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+      },
     });
+
+    if (!response.ok) {
+      throw new Error(`Failed to fetch history: ${response.status}`);
+    }
+
+    const data = await response.json();
+    return (data?.history || []) as DeviceHistoryPoint[];
+  } catch (error) {
+    console.error(`Error fetching device history for ${deviceId}:`, error);
+    return [];
   }
-  
-  return points;
 }
 
 /**
