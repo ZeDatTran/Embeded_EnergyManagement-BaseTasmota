@@ -2,18 +2,23 @@ import json
 import logging
 import os
 import time
+from collections import defaultdict
 from datetime import datetime, timedelta
+import statistics
 
 import requests
 from flask import jsonify, request
 
 from app_core import shared
+from app_core.analysis_routes import register_analysis_routes
 
 
 PRICE_PER_KWH = 2500
 
 
 def register_routes(app, socketio):
+    register_analysis_routes(app)
+
     @app.route("/", methods=["GET"])
     def home():
         endpoints = {
@@ -25,6 +30,7 @@ def register_routes(app, socketio):
 
         if shared.FORECAST_ENABLED:
             endpoints["/forecast"] = "Trigger AI forecast"
+            endpoints["/forecast/by-plug"] = "Forecast for each plug individually + push to CoreIoT"
             endpoints["/forecast/summary"] = "Get simplified forecast result (Fast)"
             endpoints["/energy"] = "Get hourly kWh data"
 
@@ -78,20 +84,30 @@ def register_routes(app, socketio):
             return jsonify({"status": "error", "message": "Invalid JWT_TOKEN"}), 401
 
         try:
-            url = f"{shared.CORE_IOT_URL}/api/tenant/devices?pageSize=100&page=0&groupId={shared.GROUP_ID}"
-            response = requests.get(url, headers=shared.HEADERS, timeout=15)
-            response.raise_for_status()
-            devices_data = response.json().get("data", [])
+            device_ids = shared.get_devices_from_group()
 
             available_devices = []
-            for device in devices_data:
-                device_id = device["id"]["id"]
+            for device_id in device_ids:
+                name = "Unknown Device"
+                dev_type = "Unknown"
+
+                try:
+                    info_url = f"{shared.CORE_IOT_URL}/api/device/{device_id}"
+                    info_resp = requests.get(info_url, headers=shared.HEADERS, timeout=10)
+                    info_resp.raise_for_status()
+                    dev = info_resp.json()
+                    name = dev.get("name", name)
+                    dev_type = dev.get("type", dev_type)
+                except requests.RequestException:
+                    # Keep placeholder metadata; ID is still valid and group-scoped.
+                    pass
+
                 is_configured = device_id in shared.CUSTOM_CB_DEVICES
                 available_devices.append(
                     {
                         "id": device_id,
-                        "name": device.get("name", "Unknown Device"),
-                        "type": device.get("type", "Unknown"),
+                        "name": name,
+                        "type": dev_type,
                         "isConfigured": is_configured,
                         "configuredAs": (
                             shared.CUSTOM_CB_DEVICES.get(device_id, {}).get("name") if is_configured else None
@@ -736,10 +752,362 @@ def register_routes(app, socketio):
             logging.error("Error toggling schedule %s: %s", schedule_id, e)
             return jsonify({"status": "error", "message": str(e)}), 500
 
+    @app.route("/schedules/auto-scenarios", methods=["POST"])
+    def generate_auto_scenarios():
+        """Generate data-driven on/off schedules from historical hourly energy usage."""
+        try:
+            payload = request.get_json(silent=True) or {}
+            lookback_days = int(payload.get("lookbackDays", 14) or 14)
+            max_devices = int(payload.get("maxDevices", 8) or 8)
+            min_samples = int(payload.get("minSamples", 12) or 12)
+            auto_apply = bool(payload.get("autoApply", True))
+            buffer_hours = int(payload.get("bufferHours", 2) or 2)
+            target_device_ids = payload.get("deviceIds")
+
+            if lookback_days < 1 or lookback_days > 90:
+                return jsonify({"status": "error", "message": "lookbackDays must be between 1 and 90"}), 400
+            if max_devices < 1 or max_devices > 50:
+                return jsonify({"status": "error", "message": "maxDevices must be between 1 and 50"}), 400
+            if buffer_hours < 0 or buffer_hours > 3:
+                return jsonify({"status": "error", "message": "bufferHours must be between 0 and 3"}), 400
+
+            now = datetime.now()
+            start_dt = now - timedelta(days=lookback_days)
+            start_ts = int(start_dt.replace(minute=0, second=0, microsecond=0).timestamp() * 1000)
+            end_ts = int(now.replace(minute=0, second=0, microsecond=0).timestamp() * 1000)
+
+            def _fetch_coreiot_hourly_points(device_id: str) -> list[dict]:
+                """Read hourly history + latest power point directly from CoreIoT."""
+                url = f"{shared.CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/values/timeseries"
+                params = {
+                    "keys": "ENERGY-Power",
+                    "startTs": start_ts,
+                    "endTs": end_ts,
+                    "limit": min(10000, lookback_days * 24 + 48),
+                    "agg": "AVG",
+                    "interval": 3600000,
+                }
+
+                history_points: dict[str, dict] = {}
+                history_resp = requests.get(url, headers=shared.HEADERS, params=params, timeout=25)
+                history_resp.raise_for_status()
+                history_payload = history_resp.json()
+
+                for entry in history_payload.get("ENERGY-Power", []):
+                    ts = entry.get("ts")
+                    if ts is None:
+                        continue
+                    try:
+                        power_w = float(entry.get("value") or 0.0)
+                    except (TypeError, ValueError):
+                        continue
+
+                    hour_dt = datetime.fromtimestamp(ts / 1000).replace(minute=0, second=0, microsecond=0)
+                    hour_key = hour_dt.strftime("%Y-%m-%dT%H:00:00")
+                    history_points[hour_key] = {
+                        "hour": hour_dt,
+                        "energy_kwh": max(0.0, power_w) / 1000.0,
+                    }
+
+                latest_params = {"keys": "ENERGY-Power", "limit": 1, "orderBy": "DESC"}
+                latest_resp = requests.get(url, headers=shared.HEADERS, params=latest_params, timeout=15)
+                latest_resp.raise_for_status()
+                latest_payload = latest_resp.json()
+                latest_entries = latest_payload.get("ENERGY-Power", [])
+                if latest_entries:
+                    latest_entry = latest_entries[0]
+                    try:
+                        latest_ts = int(latest_entry.get("ts"))
+                        latest_power_w = float(latest_entry.get("value") or 0.0)
+                        latest_dt = datetime.fromtimestamp(latest_ts / 1000).replace(minute=0, second=0, microsecond=0)
+                        latest_key = latest_dt.strftime("%Y-%m-%dT%H:00:00")
+                        history_points[latest_key] = {
+                            "hour": latest_dt,
+                            "energy_kwh": max(0.0, latest_power_w) / 1000.0,
+                        }
+                    except (TypeError, ValueError):
+                        pass
+
+                return list(history_points.values())
+
+            tracked_device_ids = shared.get_tracked_device_ids() or shared.get_devices_from_group()
+            if isinstance(target_device_ids, list) and target_device_ids:
+                device_ids = [d for d in tracked_device_ids if d in set(target_device_ids)]
+            else:
+                device_ids = tracked_device_ids
+
+            if not device_ids:
+                return jsonify({"status": "empty", "message": "No devices found"}), 200
+
+            suggestions = []
+            created_schedules = []
+            existing_schedules = shared.get_all_schedules()
+
+            for device_id in device_ids[:max_devices]:
+                try:
+                    device_points = _fetch_coreiot_hourly_points(device_id)
+                except Exception as fetch_err:
+                    logging.warning("Auto scenario: failed fetching CoreIoT history for %s: %s", device_id, fetch_err)
+                    continue
+
+                if len(device_points) < min_samples:
+                    continue
+
+                hourly_energy = defaultdict(float)
+                weekday_hits = defaultdict(int)
+                for point in device_points:
+                    dt = point.get("hour")
+                    if not isinstance(dt, datetime):
+                        continue
+
+                    try:
+                        energy = float(point.get("energy_kwh") or 0.0)
+                    except (TypeError, ValueError):
+                        energy = 0.0
+
+                    if energy <= 0:
+                        continue
+
+                    hourly_energy[dt.hour] += energy
+                    day_code = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][dt.weekday()]
+                    weekday_hits[day_code] += 1
+
+                if not hourly_energy:
+                    continue
+
+                # Select active hours by usage intensity and derive the main continuous window.
+                max_hour_energy = max(hourly_energy.values())
+                threshold = max_hour_energy * 0.4
+                active_hours = sorted([h for h, e in hourly_energy.items() if e >= threshold])
+                if not active_hours:
+                    continue
+
+                segments = []
+                current_segment = [active_hours[0]]
+                for h in active_hours[1:]:
+                    if h == current_segment[-1] + 1:
+                        current_segment.append(h)
+                    else:
+                        segments.append(current_segment)
+                        current_segment = [h]
+                segments.append(current_segment)
+
+                best_segment = max(
+                    segments,
+                    key=lambda seg: sum(hourly_energy.get(hour, 0.0) for hour in seg),
+                )
+                on_hour = (best_segment[0] - buffer_hours) % 24
+                off_hour = (best_segment[-1] + 1 + buffer_hours) % 24
+
+                on_time = f"{on_hour:02d}:00"
+                off_time = f"{off_hour:02d}:00"
+
+                weekday_counts = list(weekday_hits.values())
+                median_hits = statistics.median(weekday_counts) if weekday_counts else 0
+                days = [d for d in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] if weekday_hits[d] >= median_hits and weekday_hits[d] > 0]
+                if not days:
+                    days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+                metadata = (
+                    shared.CUSTOM_CB_DEVICES.get(device_id)
+                    or shared.DEVICE_METADATA_CACHE.get(device_id)
+                    or shared.latest_data.get(device_id, {}).get("metadata")
+                    or {}
+                )
+                device_name = metadata.get("name") or f"Device {device_id[-6:]}"
+
+                on_name = f"Auto ON {device_name}"
+                off_name = f"Auto OFF {device_name}"
+
+                suggestion = {
+                    "deviceId": device_id,
+                    "deviceName": device_name,
+                    "days": days,
+                    "onSchedule": {
+                        "name": on_name,
+                        "targetId": device_id,
+                        "action": "on",
+                        "time": on_time,
+                        "days": days,
+                        "enabled": True,
+                    },
+                    "offSchedule": {
+                        "name": off_name,
+                        "targetId": device_id,
+                        "action": "off",
+                        "time": off_time,
+                        "days": days,
+                        "enabled": True,
+                    },
+                    "analysis": {
+                        "samples": len(device_points),
+                        "activeHours": active_hours,
+                        "peakWindow": [best_segment[0], best_segment[-1]],
+                        "bufferHours": buffer_hours,
+                        "extendedWindow": [on_hour, (off_hour - 1) % 24],
+                        "dataSource": "coreiot_direct",
+                        "totalKwhInWindow": round(
+                            sum(hourly_energy.get(hour, 0.0) for hour in best_segment),
+                            4,
+                        ),
+                    },
+                }
+                suggestions.append(suggestion)
+
+                if auto_apply:
+                    existing_keys = {
+                        (
+                            sch.get("targetId"),
+                            sch.get("action"),
+                            sch.get("time"),
+                            ",".join(sorted(sch.get("days", []))),
+                            bool(sch.get("source") == "data_driven"),
+                        )
+                        for sch in existing_schedules
+                    }
+
+                    for schedule_payload in (suggestion["onSchedule"], suggestion["offSchedule"]):
+                        dedupe_key = (
+                            schedule_payload["targetId"],
+                            schedule_payload["action"],
+                            schedule_payload["time"],
+                            ",".join(sorted(schedule_payload["days"])),
+                            True,
+                        )
+                        if dedupe_key in existing_keys:
+                            continue
+
+                        created = shared.create_schedule(
+                            name=schedule_payload["name"],
+                            target_id=schedule_payload["targetId"],
+                            action=schedule_payload["action"],
+                            time=schedule_payload["time"],
+                            days=schedule_payload["days"],
+                            enabled=True,
+                            run_once=False,
+                            source="data_driven",
+                            source_run_id=None,
+                            approval_status="approved",
+                            execution_priority=80,
+                            metadata={
+                                "generator": "auto_scenarios",
+                                "lookbackDays": lookback_days,
+                                "deviceId": device_id,
+                            },
+                        )
+                        created_schedules.append(created)
+                        existing_keys.add(dedupe_key)
+
+            if auto_apply and created_schedules:
+                for schedule in created_schedules:
+                    socketio.emit("schedule_created", schedule, room="schedules")
+
+            return jsonify(
+                {
+                    "status": "success",
+                    "data": {
+                        "lookbackDays": lookback_days,
+                        "bufferHours": buffer_hours,
+                        "autoApply": auto_apply,
+                        "suggestionCount": len(suggestions),
+                        "createdSchedulesCount": len(created_schedules),
+                        "suggestions": suggestions,
+                        "createdSchedules": created_schedules,
+                    },
+                }
+            )
+        except Exception as e:
+            logging.error("Error generating auto scenarios: %s", e)
+            return jsonify({"status": "error", "message": str(e)}), 500
+
     if shared.FORECAST_ENABLED:
+        def _push_ml_analysis_to_coreiot(device_id: str, forecast_payload: dict):
+            """Push ML analysis telemetry and prediction attributes to CoreIoT for one device."""
+            now_ms = int(time.time() * 1000)
+            predicted_bill_vnd = round(float(forecast_payload.get("PredictedBillVND", 0) or 0), 2)
+            predicted_kwh = round(float(forecast_payload.get("TotalKwhForecasted", 0) or 0), 6)
+            values = {
+                "ml_predicted_bill_vnd": predicted_bill_vnd,
+                "ml_total_kwh_forecasted": predicted_kwh,
+                "ml_total_kwh_month": round(float(forecast_payload.get("TotalKwhMonth", 0) or 0), 6),
+                "ml_consumed_this_month_kwh": round(float(forecast_payload.get("ConsumedThisMonthKwh", 0) or 0), 6),
+                # New telemetry keys requested for per-plug prediction sync.
+                "forecast_price_vnd": predicted_bill_vnd,
+                "forecast_kwh_predicted": predicted_kwh,
+            }
+            telemetry_payload = {"ts": now_ms, "values": values}
+            attribute_payload = {
+                "forecast_price_vnd": predicted_bill_vnd,
+                "forecast_kwh_predicted": predicted_kwh,
+            }
+
+            candidate_urls = [
+                f"{shared.CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/timeseries/ANY?scope=ANY",
+                f"{shared.CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/timeseries/SERVER_SCOPE",
+                f"{shared.CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/timeseries/CLIENT_SCOPE",
+            ]
+
+            errors = []
+            for url in candidate_urls:
+                try:
+                    resp = requests.post(url, headers=shared.HEADERS, json=telemetry_payload, timeout=20)
+                    if 200 <= resp.status_code < 300:
+                        attribute_status = {"pushed": False}
+                        attribute_url = (
+                            f"{shared.CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/attributes/SERVER_SCOPE"
+                        )
+                        try:
+                            attr_resp = requests.post(
+                                attribute_url,
+                                headers=shared.HEADERS,
+                                json=attribute_payload,
+                                timeout=20,
+                            )
+                            attribute_status = {
+                                "pushed": 200 <= attr_resp.status_code < 300,
+                                "url": attribute_url,
+                                "statusCode": attr_resp.status_code,
+                                "response": (attr_resp.text or "")[:300],
+                            }
+                        except Exception as attr_err:
+                            attribute_status = {
+                                "pushed": False,
+                                "url": attribute_url,
+                                "error": str(attr_err),
+                            }
+
+                        return True, {
+                            "deviceId": device_id,
+                            "url": url,
+                            "statusCode": resp.status_code,
+                            "values": values,
+                            "attributes": attribute_status,
+                        }
+
+                    errors.append(
+                        {
+                            "url": url,
+                            "statusCode": resp.status_code,
+                            "response": (resp.text or "")[:300],
+                        }
+                    )
+                except Exception as e:
+                    errors.append({"url": url, "error": str(e)})
+
+            return False, {
+                "deviceId": device_id,
+                "message": "Unable to push ML telemetry to CoreIoT",
+                "attempts": errors,
+                "payload": telemetry_payload,
+            }
+
         @app.route("/forecast", methods=["GET"])
         def trigger_forecast():
             logging.info("--- MANUAL FORECAST TRIGGERED ---")
+            try:
+                forecast_coreiot_timeout = float(os.getenv("FORECAST_COREIOT_TIMEOUT_SEC", "6"))
+            except ValueError:
+                forecast_coreiot_timeout = 6.0
 
             def _coreiot_hourly_kwh(start_dt: datetime, end_dt: datetime) -> dict[str, float]:
                 start_ts = int(start_dt.timestamp() * 1000)
@@ -760,7 +1128,7 @@ def register_routes(app, socketio):
                             "agg": "AVG",
                             "interval": 3600000,
                         }
-                        resp = requests.get(url, headers=shared.HEADERS, params=params, timeout=20)
+                        resp = requests.get(url, headers=shared.HEADERS, params=params, timeout=forecast_coreiot_timeout)
                         resp.raise_for_status()
                         raw = resp.json()
 
@@ -797,7 +1165,7 @@ def register_routes(app, socketio):
                             f"{shared.CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/"
                             "values/timeseries?keys=ENERGY-Total&limit=1"
                         )
-                        resp = requests.get(url, headers=shared.HEADERS, timeout=20)
+                        resp = requests.get(url, headers=shared.HEADERS, timeout=forecast_coreiot_timeout)
                         resp.raise_for_status()
                         raw = resp.json()
                         entries = raw.get("ENERGY-Total", [])
@@ -852,6 +1220,245 @@ def register_routes(app, socketio):
                 return jsonify(result)
 
             return jsonify({"status": "error", "message": "AI Server not responding"}), 500
+
+        @app.route("/forecast/push-coreiot", methods=["POST"])
+        def push_forecast_to_coreiot():
+            """Push latest forecast analysis data to CoreIoT as telemetry."""
+            data = request.json or {}
+            device_id = data.get("deviceId") or shared.ML_ANALYSIS_DEVICE_ID
+
+            if not device_id:
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": "Missing target deviceId. Set ML_ANALYSIS_DEVICE_ID in .env or pass deviceId in body.",
+                        }
+                    ),
+                    400,
+                )
+
+            forecast_payload = data.get("forecast")
+            if not forecast_payload:
+                try:
+                    with open("forecast_result.json", "r", encoding="utf-8") as f:
+                        forecast_payload = json.load(f)
+                except FileNotFoundError:
+                    return (
+                        jsonify(
+                            {
+                                "status": "error",
+                                "message": "No forecast payload in request and forecast_result.json not found. Call /forecast first or send forecast in request body.",
+                            }
+                        ),
+                        400,
+                    )
+                except Exception as e:
+                    return jsonify({"status": "error", "message": str(e)}), 500
+
+            ok, result = _push_ml_analysis_to_coreiot(device_id, forecast_payload)
+            if ok:
+                return jsonify({"status": "success", "result": result})
+            return jsonify({"status": "error", "result": result}), 502
+
+        @app.route("/forecast/by-plug", methods=["GET"])
+        def forecast_by_plug():
+            """Forecast energy consumption for each plug individually."""
+            logging.info("--- FORECAST BY PLUG TRIGGERED ---")
+
+            now = datetime.now()
+            start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+            def _coreiot_hourly_from_energy_total(device_id: str, start_dt: datetime, end_dt: datetime) -> dict:
+                """Build hourly kWh series for one device from its ENERGY-Total timeseries."""
+                url = f"{shared.CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/values/timeseries"
+                params = {
+                    "keys": "ENERGY-Total",
+                    "startTs": int(start_dt.timestamp() * 1000),
+                    "endTs": int(end_dt.timestamp() * 1000),
+                    "limit": 50000,
+                }
+                resp = requests.get(url, headers=shared.HEADERS, params=params, timeout=20)
+                resp.raise_for_status()
+                payload = resp.json()
+                entries = payload.get("ENERGY-Total", [])
+                if not entries:
+                    return {}
+
+                parsed = []
+                for entry in entries:
+                    try:
+                        ts_ms = int(entry.get("ts"))
+                        total_kwh = float(entry.get("value") or 0.0)
+                        parsed.append((ts_ms, max(0.0, total_kwh)))
+                    except (TypeError, ValueError):
+                        continue
+
+                if len(parsed) < 2:
+                    return {}
+
+                parsed.sort(key=lambda x: x[0])
+                hourly = defaultdict(float)
+
+                prev_total = parsed[0][1]
+                for ts_ms, total_kwh in parsed[1:]:
+                    delta = total_kwh - prev_total
+                    # Device reset can make cumulative value drop.
+                    if delta < 0:
+                        delta = total_kwh
+                    prev_total = total_kwh
+
+                    if delta <= 0:
+                        continue
+
+                    hour_key = datetime.fromtimestamp(ts_ms / 1000).replace(
+                        minute=0, second=0, microsecond=0
+                    ).strftime("%Y-%m-%dT%H:00:00")
+                    hourly[hour_key] += delta
+
+                return {k: round(v, 6) for k, v in hourly.items() if v > 0}
+
+            def _coreiot_latest_energy_total(device_id: str) -> float | None:
+                """Get the latest real-time ENERGY-Total value for one device from CoreIoT."""
+                url = f"{shared.CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/values/timeseries"
+                params = {
+                    "keys": "ENERGY-Total",
+                    "limit": 1,
+                    "orderBy": "DESC",
+                }
+                resp = requests.get(url, headers=shared.HEADERS, params=params, timeout=20)
+                resp.raise_for_status()
+                payload = resp.json()
+                entries = payload.get("ENERGY-Total", [])
+                if not entries:
+                    return None
+
+                try:
+                    return max(0.0, float(entries[0].get("value") or 0.0))
+                except (TypeError, ValueError):
+                    return None
+
+            plugs = shared.get_all_plugs_for_forecast()
+            if not plugs:
+                return jsonify({
+                    "status": "empty",
+                    "message": "No plugs configured. Please add at least one CB device.",
+                    "data": []
+                }), 200
+
+            results_by_plug = {}
+            total_bill = 0
+            total_kwh_forecasted = 0
+            total_kwh_month = 0
+            push_errors = []
+
+            for plug_info in plugs:
+                device_id = plug_info["device_id"]
+                plug_name = plug_info["name"]
+
+                try:
+                    # Build per-plug history strictly from this device's ENERGY-Total on CoreIoT.
+                    history_dict = _coreiot_hourly_from_energy_total(device_id, start_of_month, now)
+
+                    if not history_dict:
+                        logging.warning("Forecast for plug %s: ENERGY-Total history unavailable", plug_name)
+                        results_by_plug[device_id] = {
+                            "plugName": plug_name,
+                            "deviceId": device_id,
+                            "status": "warning",
+                            "message": "No ENERGY-Total history for this plug"
+                        }
+                        continue
+
+                    realtime_total = _coreiot_latest_energy_total(device_id)
+                    if realtime_total is None:
+                        # Fallback only when CoreIoT latest value is unavailable.
+                        consumed_this_month = round(sum(history_dict.values()), 6)
+                        logging.warning(
+                            "Realtime ENERGY-Total unavailable for %s (%s), fallback consumed=%.3f kWh from history",
+                            plug_name,
+                            device_id,
+                            consumed_this_month,
+                        )
+                    else:
+                        consumed_this_month = round(realtime_total, 6)
+
+                    logging.info(
+                        "Forecasting plug %s (device=%s): Consumed=%.3f kWh from real-time ENERGY-Total",
+                        plug_name,
+                        device_id,
+                        consumed_this_month,
+                    )
+                    forecast_result = shared.forecast_client.predict(history_dict, consumed_this_month)
+
+                    if not forecast_result:
+                        logging.error("Forecast failed for plug %s", plug_name)
+                        results_by_plug[device_id] = {
+                            "plugName": plug_name,
+                            "deviceId": device_id,
+                            "status": "error",
+                            "message": "ML server failed to forecast"
+                        }
+                        continue
+
+                    forecast_result["deviceId"] = device_id
+                    forecast_result["plugName"] = plug_name
+                    forecast_result["ConsumedThisMonthKwh"] = round(consumed_this_month, 2)
+
+                    ok, push_result = _push_ml_analysis_to_coreiot(device_id, forecast_result)
+                    if not ok:
+                        logging.warning("Failed to push forecast for plug %s to CoreIoT: %s", plug_name, push_result)
+                        push_errors.append({
+                            "deviceId": device_id,
+                            "plugName": plug_name,
+                            "error": push_result.get("message", "Unknown error")
+                        })
+                    else:
+                        logging.info(
+                            "Forecast pushed to CoreIoT for plug %s: Bill=%d VND, PredKwh=%.3f",
+                            plug_name,
+                            forecast_result.get("PredictedBillVND", 0),
+                            float(forecast_result.get("TotalKwhForecasted", 0) or 0),
+                        )
+
+                    total_bill += forecast_result.get("PredictedBillVND", 0)
+                    total_kwh_forecasted += forecast_result.get("TotalKwhForecasted", 0)
+                    total_kwh_month += forecast_result.get("TotalKwhMonth", 0)
+
+                    results_by_plug[device_id] = {
+                        "plugName": plug_name,
+                        "deviceId": device_id,
+                        "status": "success",
+                        "predictedBillVnd": forecast_result.get("PredictedBillVND", 0),
+                        "predictedKwh": round(float(forecast_result.get("TotalKwhForecasted", 0) or 0), 3),
+                        "totalKwhForecasted": round(forecast_result.get("TotalKwhForecasted", 0), 2),
+                        "totalKwhMonth": round(forecast_result.get("TotalKwhMonth", 0), 2),
+                        "consumedThisMonthKwh": forecast_result.get("ConsumedThisMonthKwh", 0),
+                        "hourlyPredictions": forecast_result.get("HourlyPredictions", []),
+                    }
+
+                except Exception as e:
+                    logging.error("Error forecasting plug %s: %s", plug_name, e)
+                    results_by_plug[device_id] = {
+                        "plugName": plug_name,
+                        "deviceId": device_id,
+                        "status": "error",
+                        "message": str(e)
+                    }
+
+            response = {
+                "status": "success",
+                "byPlug": results_by_plug,
+                "summary": {
+                    "totalPredictedBillVnd": round(total_bill),
+                    "totalKwhForecasted": round(total_kwh_forecasted, 2),
+                    "totalKwhMonth": round(total_kwh_month, 2),
+                },
+                "pushErrors": push_errors if push_errors else None,
+            }
+            
+            logging.info("FORECAST BY PLUG COMPLETE -> Total Bill: %d VND", round(total_bill))
+            return jsonify(response)
 
         @app.route("/forecast/summary", methods=["GET"])
         def get_forecast_summary():

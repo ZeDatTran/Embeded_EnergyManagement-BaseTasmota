@@ -11,7 +11,7 @@ interface ForecastData {
     kwh_da_tieu_thu_thang_nay?: number
 }
 
-const AI_SERVER_URL = "http://localhost:5000"
+const AI_SERVER_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000"
 const STORAGE_KEY = "ai_forecast_result" // session storage
 
 export function AIPredictEnergy() {
@@ -56,8 +56,22 @@ export function AIPredictEnergy() {
         setForecastData(null) // Reset giao diện
 
         try {
-            const res = await fetch(`${AI_SERVER_URL}/forecast`)
-            const result = await res.json()
+            const controller = new AbortController()
+            const timeoutId = setTimeout(() => controller.abort(), 45000)
+
+            const res = await fetch(`${AI_SERVER_URL}/forecast`, {
+                method: "GET",
+                signal: controller.signal,
+            })
+
+            clearTimeout(timeoutId)
+
+            let result: any = null
+            try {
+                result = await res.json()
+            } catch {
+                result = null
+            }
 
             if (res.ok) {
                 // Lấy lại summary chuẩn
@@ -72,10 +86,15 @@ export function AIPredictEnergy() {
                     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(dataSummary.data))
                 }
             } else {
-                setForecastStatus(`Lỗi: ${result.message}`)
+                const message = result?.message || "Không nhận được phản hồi hợp lệ từ server dự báo."
+                setForecastStatus(`Lỗi: ${message}`)
             }
-        } catch (error) {
-            setForecastStatus("Lỗi kết nối tới Server AI!")
+        } catch (error: any) {
+            if (error?.name === "AbortError") {
+                setForecastStatus("Lỗi: AI Server phản hồi quá chậm (timeout 45s).")
+            } else {
+                setForecastStatus("Lỗi kết nối tới Server AI!")
+            }
         } finally {
             setIsForecasting(false)
         }

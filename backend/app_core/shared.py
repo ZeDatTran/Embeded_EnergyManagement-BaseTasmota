@@ -39,6 +39,7 @@ CORE_IOT_URL = "https://app.coreiot.io"
 JWT_TOKEN = os.getenv("JWT_TOKEN")
 DEVICE_ID = os.getenv("DEVICE_ID")
 GROUP_ID = os.getenv("GROUP_ID")
+ML_ANALYSIS_DEVICE_ID = os.getenv("ML_ANALYSIS_DEVICE_ID") or DEVICE_ID
 HEADERS = {"Authorization": f"Bearer {JWT_TOKEN}"}
 
 if not all([JWT_TOKEN, DEVICE_ID, GROUP_ID]):
@@ -223,46 +224,50 @@ def verify_token():
 
 
 def get_devices_from_group():
-    """Get all devices from group with fallback."""
+    """Get all DEVICE ids from configured entity group only (no tenant fallback)."""
+    if not GROUP_ID:
+        logging.error("GROUP_ID is missing. Refusing tenant-wide device fetch.")
+        return []
+
     try:
-        url = f"{CORE_IOT_URL}/api/tenant/devices?pageSize=100&page=0&groupId={GROUP_ID}"
+        # CoreIoT/ThingsBoard entity-group endpoint gives strict group membership.
+        url = f"{CORE_IOT_URL}/api/entityGroup/{GROUP_ID}/entities?pageSize=100&page=0&entityType=DEVICE"
         response = requests.get(url, headers=HEADERS, timeout=15)
         response.raise_for_status()
-        devices_data = response.json().get("data", [])
+        payload = response.json()
 
-        if not isinstance(devices_data, list):
-            logging.warning(
-                "Expected list from /api/tenant/devices but got %s. Fallback.",
-                type(devices_data),
-            )
-            raise requests.RequestException("Invalid data format from group API")
+        if isinstance(payload, dict):
+            entities = payload.get("data", [])
+        elif isinstance(payload, list):
+            entities = payload
+        else:
+            entities = []
 
-        device_ids = [device["id"]["id"] for device in devices_data]
+        device_ids = []
+        for entity in entities:
+            if not isinstance(entity, dict):
+                continue
+            # Common shapes: {id:{id,entityType}}, or {entityId:{id,...}}, or direct id
+            if isinstance(entity.get("id"), dict):
+                dev_id = entity["id"].get("id")
+            elif isinstance(entity.get("entityId"), dict):
+                dev_id = entity["entityId"].get("id")
+            else:
+                dev_id = entity.get("id")
+
+            if dev_id:
+                device_ids.append(dev_id)
 
         if not device_ids:
-            logging.warning("No devices found in group %s. Checking fallback.", GROUP_ID)
-            raise requests.RequestException("No devices in group")
+            logging.warning("No devices found in group %s.", GROUP_ID)
+            return []
 
         logging.info("Found %s devices in group %s", len(device_ids), GROUP_ID)
         return device_ids
 
     except requests.RequestException as e:
         logging.error("Error fetching devices from group %s: %s", GROUP_ID, e)
-        try:
-            response = requests.get(
-                f"{CORE_IOT_URL}/api/tenant/devices?pageSize=100&page=0",
-                headers=HEADERS,
-                timeout=15,
-            )
-            response.raise_for_status()
-            devices = response.json()["data"]
-            device_ids = [device["id"]["id"] for device in devices]
-            logging.info("Fallback: Found %s devices in tenant", len(device_ids))
-            return device_ids
-        except requests.RequestException as e_fallback:
-            logging.error("Error fetching tenant devices (fallback): %s", e_fallback)
-            logging.warning("Fallback: Using default DEVICE_ID %s", DEVICE_ID)
-            return [DEVICE_ID]
+        return []
 
 
 def get_device_telemetry(device_id):
@@ -440,3 +445,33 @@ def generate_mock_device_history(period):
         )
 
     return history
+
+
+def get_plug_hourly_history_for_forecast(device_id: str, start_of_month: datetime, now: datetime) -> dict:
+    """Get hourly history for one plug from plug_hourly_energy table for forecasting."""
+    start_iso = start_of_month.strftime("%Y-%m-%dT%H:00:00")
+    end_iso = now.strftime("%Y-%m-%dT%H:00:00")
+    
+    rows = list_plug_hourly_energy(start_iso=start_iso, end_iso=end_iso, device_id=device_id)
+    history_dict = {}
+    for row in rows:
+        hour_bucket = row.get("hour_bucket")
+        energy_kwh = row.get("energy_kwh", 0.0)
+        try:
+            history_dict[hour_bucket] = float(energy_kwh)
+        except (TypeError, ValueError):
+            pass
+    
+    return history_dict
+
+
+def get_all_plugs_for_forecast() -> list[dict]:
+    """Return list of custom CB devices with their metadata for batch forecasting."""
+    plugs = []
+    for device_id, metadata in CUSTOM_CB_DEVICES.items():
+        plugs.append({
+            "device_id": device_id,
+            "name": metadata.get("name", f"CB {device_id}"),
+            "location": metadata.get("location", "N/A"),
+        })
+    return plugs

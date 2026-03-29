@@ -4,33 +4,122 @@ import json
 import pandas as pd
 import numpy as np
 import joblib
+import os
+import signal
 from pathlib import Path
 
 try:
-    from .ensemble_model import ModelEnsemble
+    from .ensemble_model_improved import ImprovedModelEnsemble
 except ImportError:
-    from ensemble_model import ModelEnsemble
+    from ensemble_model_improved import ImprovedModelEnsemble
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-ENSEMBLE_PATH = ROOT_DIR / "ensemble_model.pkl"
-SCALER_PATH = ROOT_DIR / "scaler.pkl"
+ENSEMBLE_PATH = ROOT_DIR / "ensemble_model_improved.pkl"
+SCALER_PATH = ROOT_DIR / "scaler_improved.pkl"
 
-# --- Tải các mô hình và preprocessors ---
+# --- Tải model/scaler ---
 try:
-    ensemble_model = joblib.load(ENSEMBLE_PATH)
     scaler = joblib.load(SCALER_PATH)
+    ensemble_model = ImprovedModelEnsemble(use_improved=True)
 except FileNotFoundError:
-    print("Lỗi: Vui lòng chạy 'python -m ml.train_forecast_models' trước.")
+    print("Lỗi: thiếu improved artifacts. Vui lòng chạy 'python -m ml.train_improved_models' trước.")
     exit()
 
-print("Đã tải Ensemble Model và Scaler.")
+print("Đã tải Improved Ensemble Model và scaler_improved.pkl.")
 
 # Tên các cột (giống hệt lúc train)
-FEATURES = ['hour', 'dayofweek', 'month', 'is_weekend',
-            'kwh_lag_24h', 'kwh_lag_48h', 'kwh_lag_168h',
-            'kwh_rolling_mean_24h']
+IMPROVED_FEATURES = [
+    'hour', 'dayofweek', 'month', 'is_weekend', 'quarter', 'is_holiday_period',
+    'kwh_lag_1h', 'kwh_lag_24h', 'kwh_lag_48h', 'kwh_lag_168h', 'kwh_lag_336h',
+    'kwh_rolling_mean_6h', 'kwh_rolling_std_6h', 'kwh_rolling_min_6h', 'kwh_rolling_max_6h',
+    'kwh_rolling_mean_24h', 'kwh_rolling_std_24h', 'kwh_rolling_min_24h', 'kwh_rolling_max_24h',
+    'kwh_rolling_mean_48h', 'kwh_rolling_std_48h', 'kwh_rolling_min_48h', 'kwh_rolling_max_48h',
+    'kwh_trend_24h', 'kwh_trend_168h', 'hour_kwh_interaction', 'daytype_kwh_interaction'
+]
+FEATURES = IMPROVED_FEATURES
 TARGET = 'kwh_hour'
+
+
+def _build_improved_features(forecast_df: pd.DataFrame, ts: pd.Timestamp) -> dict:
+    last_known = float(forecast_df.iloc[-1][TARGET])
+
+    def get_lag(hours: int, default_val: float) -> float:
+        t = ts - pd.Timedelta(hours=hours)
+        if t in forecast_df.index:
+            return float(forecast_df.loc[t][TARGET])
+        return default_val
+
+    def rolling_stat(hours_back_start: int, hours_back_end: int, stat: str, default_val: float) -> float:
+        start = ts - pd.Timedelta(hours=hours_back_start)
+        end = ts - pd.Timedelta(hours=hours_back_end)
+        idx = pd.date_range(start, end, freq='h')
+        values = forecast_df.loc[forecast_df.index.intersection(idx)][TARGET]
+        if len(values) == 0:
+            return default_val
+        if stat == 'mean':
+            return float(values.mean())
+        if stat == 'std':
+            return float(values.std()) if len(values) > 1 else 0.0
+        if stat == 'min':
+            return float(values.min())
+        if stat == 'max':
+            return float(values.max())
+        return default_val
+
+    lag_1 = get_lag(1, last_known)
+    lag_24 = get_lag(24, last_known)
+    lag_48 = get_lag(48, lag_24)
+    lag_168 = get_lag(168, lag_48)
+    lag_336 = get_lag(336, lag_168)
+
+    rolling_mean_6 = rolling_stat(30, 25, 'mean', lag_24)
+    rolling_std_6 = rolling_stat(30, 25, 'std', 0.0)
+    rolling_min_6 = rolling_stat(30, 25, 'min', lag_24)
+    rolling_max_6 = rolling_stat(30, 25, 'max', lag_24)
+
+    rolling_mean_24 = rolling_stat(48, 25, 'mean', lag_24)
+    rolling_std_24 = rolling_stat(48, 25, 'std', 0.0)
+    rolling_min_24 = rolling_stat(48, 25, 'min', lag_24)
+    rolling_max_24 = rolling_stat(48, 25, 'max', lag_24)
+
+    rolling_mean_48 = rolling_stat(72, 25, 'mean', lag_24)
+    rolling_std_48 = rolling_stat(72, 25, 'std', 0.0)
+    rolling_min_48 = rolling_stat(72, 25, 'min', lag_24)
+    rolling_max_48 = rolling_stat(72, 25, 'max', lag_24)
+
+    trend_24 = (lag_24 - lag_48) / (lag_48 + 0.01)
+    trend_168 = (lag_168 - lag_336) / (lag_336 + 0.01)
+
+    return {
+        'hour': ts.hour,
+        'dayofweek': ts.dayofweek,
+        'month': ts.month,
+        'is_weekend': int(ts.dayofweek >= 5),
+        'quarter': ((ts.month - 1) // 3) + 1,
+        'is_holiday_period': int(ts.month in [1, 12]),
+        'kwh_lag_1h': lag_1,
+        'kwh_lag_24h': lag_24,
+        'kwh_lag_48h': lag_48,
+        'kwh_lag_168h': lag_168,
+        'kwh_lag_336h': lag_336,
+        'kwh_rolling_mean_6h': rolling_mean_6,
+        'kwh_rolling_std_6h': rolling_std_6,
+        'kwh_rolling_min_6h': rolling_min_6,
+        'kwh_rolling_max_6h': rolling_max_6,
+        'kwh_rolling_mean_24h': rolling_mean_24,
+        'kwh_rolling_std_24h': rolling_std_24,
+        'kwh_rolling_min_24h': rolling_min_24,
+        'kwh_rolling_max_24h': rolling_max_24,
+        'kwh_rolling_mean_48h': rolling_mean_48,
+        'kwh_rolling_std_48h': rolling_std_48,
+        'kwh_rolling_min_48h': rolling_min_48,
+        'kwh_rolling_max_48h': rolling_max_48,
+        'kwh_trend_24h': trend_24,
+        'kwh_trend_168h': trend_168,
+        'hour_kwh_interaction': ts.hour * lag_24,
+        'daytype_kwh_interaction': int(ts.dayofweek >= 5) * lag_24,
+    }
 
 # --- Hàm tính tiền điện ---
 def calculate_vietnam_electricity_bill(total_kwh):
@@ -72,48 +161,29 @@ async def forecast_with_ensemble(history_df):
     hourly_details = {} 
 
     for ts in future_timestamps:
-        temp_features = {
-            'hour': ts.hour, 
-            'dayofweek': ts.dayofweek, 
-            'month': ts.month,
-            'is_weekend': int(ts.dayofweek >= 5), 
-        }
-        
         try:
-            lag_24 = ts - pd.Timedelta(hours=24)
-            lag_48 = ts - pd.Timedelta(hours=48)
-            lag_168 = ts - pd.Timedelta(hours=168)
-            
-            def get_lag_value(time_point, default_val):
-                if time_point in forecast_df.index:
-                    return forecast_df.loc[time_point][TARGET]
-                return default_val
-
-            last_known = forecast_df.iloc[-1][TARGET]
-
-            temp_features['kwh_lag_24h'] = get_lag_value(lag_24, last_known)
-            temp_features['kwh_lag_48h'] = get_lag_value(lag_48, last_known)
-            temp_features['kwh_lag_168h'] = get_lag_value(lag_168, last_known)
-            
-            start_rolling = ts - pd.Timedelta(hours=48)
-            end_rolling = ts - pd.Timedelta(hours=25)
-            rolling_data = forecast_df.loc[forecast_df.index.intersection(pd.date_range(start_rolling, end_rolling, freq='h'))][TARGET]
-            
-            if len(rolling_data) > 0:
-                temp_features['kwh_rolling_mean_24h'] = rolling_data.mean()
-            else:
-                temp_features['kwh_rolling_mean_24h'] = last_known
-
-        except Exception as e:
-            temp_features['kwh_lag_24h'] = forecast_df.iloc[-1][TARGET]
-            temp_features['kwh_lag_48h'] = forecast_df.iloc[-1][TARGET]
-            temp_features['kwh_lag_168h'] = forecast_df.iloc[-1][TARGET]
-            temp_features['kwh_rolling_mean_24h'] = forecast_df.iloc[-1][TARGET]
+            temp_features = _build_improved_features(forecast_df, ts)
+        except Exception:
+            last_known = float(forecast_df.iloc[-1][TARGET])
+            temp_features = {k: 0.0 for k in FEATURES}
+            if 'hour' in temp_features:
+                temp_features['hour'] = float(ts.hour)
+            if 'dayofweek' in temp_features:
+                temp_features['dayofweek'] = float(ts.dayofweek)
+            if 'month' in temp_features:
+                temp_features['month'] = float(ts.month)
+            if 'is_weekend' in temp_features:
+                temp_features['is_weekend'] = float(int(ts.dayofweek >= 5))
+            for key in ['kwh_lag_1h', 'kwh_lag_24h', 'kwh_lag_48h', 'kwh_lag_168h', 'kwh_lag_336h', 'kwh_rolling_mean_24h']:
+                if key in temp_features:
+                    temp_features[key] = last_known
         
         features_row_df = pd.DataFrame([temp_features], columns=FEATURES).fillna(0)
         scaled_features = scaler.transform(features_row_df)
-        
-        prediction, details = ensemble_model.predict_conservative(scaled_features)
+
+        result = ensemble_model.predict_with_confidence(scaled_features)
+        prediction = float(result["ensemble_prediction"])
+        details = result.get("individual_predictions", {})
         
         hourly_predictions.append(prediction)
         hourly_details[ts.isoformat()] = details
@@ -177,8 +247,9 @@ async def receive_data(websocket):
                     for timestamp, actual_value in actual_kwh_all.items():
                         if timestamp in predicted_details_all:
                             predicted_details_hour = predicted_details_all[timestamp]
-                            ensemble_model.update_scores(predicted_details_hour, float(actual_value))
-                            updated_count += 1
+                            if hasattr(ensemble_model, "update_scores"):
+                                ensemble_model.update_scores(predicted_details_hour, float(actual_value))
+                                updated_count += 1
 
                     if updated_count > 0:
                         joblib.dump(ensemble_model, ENSEMBLE_PATH)
@@ -202,16 +273,58 @@ async def receive_data(websocket):
             print(f"WebSocket error: {e}")
 
 async def main():
-    server = await websockets.serve(
-        receive_data, 
-        "0.0.0.0", 
-        8080,
-        ping_interval=20,
-        ping_timeout=60,
-        close_timeout=10
-    )
-    print("Forecast Server running on port 8080 (Conservative Strategy)")
-    await server.wait_closed()
+    try:
+        port = int(os.getenv("FORECAST_SERVER_PORT", "8080"))
+    except ValueError:
+        port = 8080
+
+    try:
+        server = await websockets.serve(
+            receive_data,
+            "0.0.0.0",
+            port,
+            ping_interval=20,
+            ping_timeout=60,
+            close_timeout=10
+        )
+    except OSError as e:
+        if getattr(e, "errno", None) == 10048:
+            print(f"Lỗi: cổng {port} đang được sử dụng. Hãy tắt tiến trình đang chiếm cổng hoặc đổi FORECAST_SERVER_PORT.")
+            return
+        raise
+
+    print(f"Forecast Server running on port {port} (Improved Model Only)")
+
+    stop_event = asyncio.Event()
+
+    def _request_shutdown(signum, _frame):
+        sig_name = signal.Signals(signum).name if signum else "UNKNOWN"
+        print(f"Shutdown signal received: {sig_name}")
+        stop_event.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, _request_shutdown)
+        except Exception:
+            pass
+
+    if hasattr(signal, "SIGBREAK"):
+        try:
+            signal.signal(signal.SIGBREAK, _request_shutdown)
+        except Exception:
+            pass
+
+    try:
+        await stop_event.wait()
+    finally:
+        server.close()
+        await server.wait_closed()
+        print(f"Forecast Server on port {port} has stopped.")
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        # The signal handler triggers graceful shutdown; this keeps exit clean.
+        pass

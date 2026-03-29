@@ -3,6 +3,7 @@ import websocket
 import json
 import logging
 import threading
+import os
 
 class ForecastClient:
     _instance = None
@@ -20,23 +21,34 @@ class ForecastClient:
     def connect(self):
         if self.ws and self.connected and self.ws.sock and self.ws.sock.fileno() != -1:
             return self.ws
-            
+
+        server_url = self._resolve_server_url()
+
         try:
             self.ws = websocket.WebSocket()
-            self.ws.connect("ws://127.0.0.1:8080", timeout=30)
+            self.ws.connect(server_url, timeout=30)
             self.connected = True
-            logging.info("Connected to forecast server (8080)")
+            logging.info("Connected to forecast server: %s", server_url)
             return self.ws
         except Exception as e:
-            logging.error(f"Forecast server connect failed: {e}")
+            logging.error("Forecast server connect failed (%s): %s", server_url, e)
             self.connected = False
             if self.ws:
                 try:
                     self.ws.close()
-                except:
+                except Exception:
                     pass
             self.ws = None
             return None
+
+    def _resolve_server_url(self):
+        url = os.getenv("FORECAST_SERVER_URL")
+        if url:
+            return url
+
+        host = os.getenv("FORECAST_SERVER_HOST", "127.0.0.1")
+        port = os.getenv("FORECAST_SERVER_PORT", "8080")
+        return f"ws://{host}:{port}"
 
     def predict(self, history_dict, consumed_this_month):
         ws = self.connect()

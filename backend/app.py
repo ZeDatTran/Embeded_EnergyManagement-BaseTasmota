@@ -1,6 +1,7 @@
 ﻿import threading
+import logging
 
-from flask import Flask
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_socketio import SocketIO
 
@@ -16,6 +17,12 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 register_routes(app, socketio)
 register_socket_handlers(socketio)
+
+
+@app.errorhandler(Exception)
+def handle_unexpected_error(error):
+    logging.exception("Unhandled error on %s: %s", request.path, error)
+    return jsonify({"status": "error", "message": str(error)}), 500
 
 
 def start_background_jobs():

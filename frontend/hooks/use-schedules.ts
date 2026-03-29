@@ -14,6 +14,35 @@ export interface Schedule {
   createdAt: string
 }
 
+export interface AutoScenarioRequest {
+  lookbackDays?: number
+  maxDevices?: number
+  minSamples?: number
+  autoApply?: boolean
+  deviceIds?: string[]
+}
+
+export interface AutoScenarioResponse {
+  lookbackDays: number
+  autoApply: boolean
+  suggestionCount: number
+  createdSchedulesCount: number
+  suggestions: Array<{
+    deviceId: string
+    deviceName: string
+    days: string[]
+    onSchedule: Omit<Schedule, "id" | "createdAt">
+    offSchedule: Omit<Schedule, "id" | "createdAt">
+    analysis: {
+      samples: number
+      activeHours: number[]
+      peakWindow: [number, number]
+      totalKwhInWindow: number
+    }
+  }>
+  createdSchedules: Schedule[]
+}
+
 export function useSchedules() {
   return useQuery({
     queryKey: ["schedules"],
@@ -104,6 +133,30 @@ export function useToggleSchedule() {
         throw new Error(error.message || "Failed to toggle schedule")
       }
       return response.json() as Promise<Schedule>
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["schedules"] })
+    },
+  })
+}
+
+export function useGenerateAutoScenarios() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (payload: AutoScenarioRequest = {}) => {
+      const response = await fetch(`${API_BASE_URL}/schedules/auto-scenarios`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      })
+
+      const result = await response.json()
+      if (!response.ok) {
+        throw new Error(result.message || "Failed to generate auto scenarios")
+      }
+      return (result.data || {}) as AutoScenarioResponse
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["schedules"] })
