@@ -15,9 +15,10 @@ interface DeviceChartProps {
   color: string
   unit: string
   isLoading?: boolean
+  period?: "day" | "week" | "month" | "all"
 }
 
-export function DeviceChart({ data, dataKey, color, unit, isLoading }: DeviceChartProps) {
+export function DeviceChart({ data, dataKey, color, unit, isLoading, period = "day" }: DeviceChartProps) {
   if (isLoading) {
     return <Skeleton className="h-[350px] w-full" />
   }
@@ -30,15 +31,40 @@ export function DeviceChart({ data, dataKey, color, unit, isLoading }: DeviceCha
     )
   }
 
-  // Format data for chart
-  const chartData = data.map((item) => ({
-    ...item,
-    time: new Date(item.timestamp).toLocaleTimeString("vi-VN", {
-      hour: "2-digit",
-      minute: "2-digit",
-    }),
-    value: item[dataKey] || 0,
-  }))
+  // Format data for chart based on period
+  const chartData = data.map((item) => {
+    const date = new Date(item.timestamp)
+    let time = ""
+    
+    if (period === "day") {
+      // For day: show only hour (00, 01, 02, ..., 23)
+      const hour = date.getHours().toString().padStart(2, "0")
+      time = `${hour}h`
+    } else if (period === "week") {
+      // For week: show day abbreviation (e.g., Mon, Tue)
+      time = date.toLocaleDateString("vi-VN", {
+        weekday: "short",
+        day: "2-digit",
+      })
+    } else if (period === "month") {
+      // For month: show day/month (e.g., 21/3, 02/3)
+      const day = date.getDate()
+      const month = date.getMonth() + 1
+      time = `${day}/${month}`
+    } else {
+      // For all: show day/month (e.g., 21/3, 02/3)
+      const day = date.getDate()
+      const month = date.getMonth() + 1
+      time = `${day}/${month}`
+    }
+    
+    return {
+      ...item,
+      time,
+      fullTimestamp: date.toLocaleString("vi-VN"),
+      value: item[dataKey] || 0,
+    }
+  })
 
   return (
     <div className="h-[350px] w-full">
@@ -58,17 +84,19 @@ export function DeviceChart({ data, dataKey, color, unit, isLoading }: DeviceCha
             tickFormatter={(value) => `${value}`}
           />
           <Tooltip
-            content={({ active, payload, label }) => {
+            content={({ active, payload }) => {
               if (active && payload && payload.length) {
+                const item = payload[0].payload
                 return (
-                  <div className="rounded-lg border bg-background p-2 shadow-sm">
-                    <div className="grid grid-cols-2 gap-2">
-                      <span className="text-muted-foreground">Thời gian:</span>
-                      <span className="font-medium">{label}</span>
-                      <span className="text-muted-foreground">Giá trị:</span>
-                      <span className="font-medium" style={{ color }}>
-                        {Number(payload[0].value).toFixed(2)} {unit}
-                      </span>
+                  <div className="rounded-lg border bg-background p-3 shadow-md">
+                    <div className="space-y-1">
+                      <p className="text-sm font-medium">{item.fullTimestamp}</p>
+                      <p className="text-sm text-muted-foreground">
+                        Giá trị:{" "}
+                        <span className="font-semibold" style={{ color }}>
+                          {Number(payload[0].value).toFixed(2)} {unit}
+                        </span>
+                      </p>
                     </div>
                   </div>
                 )

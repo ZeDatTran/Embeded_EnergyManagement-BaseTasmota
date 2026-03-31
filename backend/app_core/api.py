@@ -13,7 +13,27 @@ from app_core import shared
 from app_core.analysis_routes import register_analysis_routes
 
 
-PRICE_PER_KWH = 2500
+def calculate_vietnam_electricity_bill(total_kwh):
+    tiers = [
+        (100, 1984),   # Bậc 1
+        (100, 2050),   # Bậc 2
+        (200, 2380),   # Bậc 3
+        (200, 2998),   # Bậc 4
+        (200, 3350),   # Bậc 5
+        (float('inf'), 3460)  # Bậc 6
+    ]
+    
+    bill = 0
+    kwh_remaining = total_kwh
+    
+    for tier_limit, price in tiers:
+        if kwh_remaining <= 0:
+            break
+        kwh_in_tier = min(kwh_remaining, tier_limit)
+        bill += kwh_in_tier * price
+        kwh_remaining -= kwh_in_tier
+    
+    return bill * 1.08  # VAT 8%
 
 
 def register_routes(app, socketio):
@@ -184,6 +204,89 @@ def register_routes(app, socketio):
             {
                 "status": "success",
                 "message": f"CB '{name}' added successfully",
+                "device": {
+                    "id": device_id,
+                    "name": name,
+                    "type": "cb",
+                    "location": location,
+                    "roomType": room_type,
+                    "roomName": room_name,
+                    "floor": floor,
+                    "maxLoad": max_load,
+                },
+            }
+        )
+
+    @app.route("/devices/cb/<string:device_id>", methods=["PUT"])
+    def update_circuit_breaker(device_id):
+        if device_id not in shared.CUSTOM_CB_DEVICES:
+            return jsonify(
+                {
+                    "status": "error",
+                    "message": "CB not found or cannot be updated (not a custom CB)",
+                }
+            ), 404
+
+        data = request.json
+        if not data:
+            return jsonify({"status": "error", "message": "No data provided"}), 400
+
+        # Get current metadata
+        current_meta = shared.CUSTOM_CB_DEVICES[device_id]
+        
+        # Update fields if provided
+        name = data.get("name", current_meta.get("name"))
+        room_type = data.get("roomType", current_meta.get("room_type", "custom"))
+        room_name = data.get("roomName", current_meta.get("room_name", ""))
+        floor = data.get("floor", current_meta.get("floor"))
+        max_load = data.get("maxLoad", current_meta.get("max_load", 32))
+
+        if not name:
+            return jsonify({"status": "error", "message": "Name is required"}), 400
+
+        # Determine location
+        if room_name:
+            location = room_name
+        elif room_type in shared.ROOM_TYPE_MAP:
+            location = shared.ROOM_TYPE_MAP[room_type]
+        else:
+            location = name
+
+        # Update metadata
+        metadata = {
+            "type": "cb",
+            "name": name,
+            "location": location,
+            "room_type": room_type,
+            "room_name": room_name,
+            "floor": floor,
+            "max_load": max_load,
+        }
+
+        shared.DEVICE_METADATA_CACHE[device_id] = metadata
+        shared.CUSTOM_CB_DEVICES[device_id] = metadata
+
+        if device_id in shared.latest_data:
+            shared.latest_data[device_id]["metadata"] = metadata
+        else:
+            shared.latest_data[device_id] = {
+                "telemetry": {},
+                "attributes": {"POWER": "N/A"},
+                "metadata": metadata,
+            }
+
+        logging.info("Updated CB: %s (ID: %s) to location %s", name, device_id, location)
+
+        socketio.emit(
+            "device_updated",
+            {"device_id": device_id, "metadata": metadata, "timestamp": datetime.now().isoformat()},
+            room="dashboard",
+        )
+
+        return jsonify(
+            {
+                "status": "success",
+                "message": f"CB '{name}' updated successfully",
                 "device": {
                     "id": device_id,
                     "name": name,
@@ -374,11 +477,19 @@ def register_routes(app, socketio):
                 page_size = max(1, min(page_size, page_size_max))
 
                 cursor_param = request.args.get("cursor")
-                start_ts_param = request.args.get("startTs", "0")
-                try:
-                    start_ts = int(cursor_param) if cursor_param is not None else int(start_ts_param)
-                except ValueError:
-                    return jsonify({"status": "error", "message": "cursor/startTs must be an integer timestamp in ms"}), 400
+                start_ts_param = request.args.get("startTs")
+                
+                # If no startTs provided, start from 1 year ago (or some reasonable past date)
+                if start_ts_param is None and cursor_param is None:
+                    # Default to 1 year ago if no starting point given
+                    one_year_ago = now - timedelta(days=365)
+                    start_ts = int(one_year_ago.timestamp() * 1000)
+                    logging.info("No startTs/cursor provided for 'all' mode, using 1 year ago: %s", start_ts)
+                else:
+                    try:
+                        start_ts = int(cursor_param) if cursor_param is not None else int(start_ts_param or 0)
+                    except ValueError:
+                        return jsonify({"status": "error", "message": "cursor/startTs must be an integer timestamp in ms"}), 400
 
                 full_history = []
                 cursor = start_ts
@@ -393,6 +504,10 @@ def register_routes(app, socketio):
 
                 while cursor <= end_ts:
                     chunk_end = min(cursor + adaptive_chunk_ms - 1, end_ts)
+                    logging.debug(
+                        "Full history fetch chunk for %s: cursor=%s, chunk_end=%s, chunk_size_ms=%s",
+                        device_id, cursor, chunk_end, adaptive_chunk_ms
+                    )
                     try:
                         raw_chunk = _fetch_timeseries(
                             start_ts=cursor,
@@ -403,21 +518,24 @@ def register_routes(app, socketio):
                             timeout=35,
                         )
                     except requests.RequestException as fetch_err:
+                        logging.warning(
+                            "Full history fetch failed for %s in [%s,%s]: %s",
+                            device_id, cursor, chunk_end, fetch_err
+                        )
                         if adaptive_chunk_ms <= min_chunk_ms:
                             raise fetch_err
 
                         adaptive_chunk_ms = max(min_chunk_ms, adaptive_chunk_ms // 2)
                         logging.warning(
-                            "Full history fetch failed for %s in [%s,%s], reducing chunk to %sms: %s",
-                            device_id,
-                            cursor,
-                            chunk_end,
+                            "Reducing chunk size to %sms and retrying",
                             adaptive_chunk_ms,
-                            fetch_err,
                         )
                         continue
 
                     chunk_history = _build_history(raw_chunk, include_ts_ms=True)
+                    logging.debug(
+                        "Received %d points from chunk [%s,%s]", len(chunk_history), cursor, chunk_end
+                    )
 
                     for point in chunk_history:
                         ts_ms = int(point.get("tsMs") or 0)
@@ -438,6 +556,10 @@ def register_routes(app, socketio):
                             next_cursor = ts_ms + 1
                             has_more = next_cursor <= end_ts
                             reached_page_limit = True
+                            logging.info(
+                                "Reached page limit for %s: %d points collected, nextCursor=%s",
+                                device_id, len(full_history), next_cursor
+                            )
                             break
 
                     if reached_page_limit:
@@ -475,34 +597,96 @@ def register_routes(app, socketio):
 
             if period == "week":
                 start_time = now - timedelta(days=7)
-                limit = 168
+                limit = 336  # 7 days × 24 hours (hourly)
                 agg = "AVG"
-                interval = 3600000
+                interval = 3600000  # 1 hour
             elif period == "month":
                 start_time = now - timedelta(days=30)
-                limit = 720
+                limit = 30  # 30 days (daily, not hourly to avoid too many points)
                 agg = "AVG"
-                interval = 3600000
-            else:
-                start_time = now - timedelta(days=1)
-                limit = 24
+                interval = 86400000  # 1 day
+            else:  # period == "day"
+                # For day view: fetch from 00:00 today to now (not "24h ago")
+                start_time = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                limit = 96  # Request 96 to handle gaps, will downample to 24
                 agg = "NONE"
                 interval = 0
 
             start_ts = int(start_time.timestamp() * 1000)
             end_ts = int(now.timestamp() * 1000)
-            raw_data = _fetch_timeseries(
-                start_ts=start_ts,
-                end_ts=end_ts,
-                limit=limit * 4,
-                agg=agg,
-                interval=interval,
+            
+            logging.info(
+                "Fetching %s history for device %s: start_ts=%s, end_ts=%s, limit=%s",
+                period, device_id, start_ts, end_ts, limit
             )
+            
+            try:
+                raw_data = _fetch_timeseries(
+                    start_ts=start_ts,
+                    end_ts=end_ts,
+                    limit=limit * 4,  # Request extra to handle gaps
+                    agg=agg,
+                    interval=interval,
+                )
+            except Exception as e:
+                logging.warning("Failed to fetch from CoreIoT with agg/interval for %s: %s", device_id, e)
+                # Fallback: try without aggregation
+                try:
+                    raw_data = _fetch_timeseries(
+                        start_ts=start_ts,
+                        end_ts=end_ts,
+                        limit=10000,
+                        agg="NONE",
+                        interval=0,
+                    )
+                except Exception as fallback_err:
+                    logging.error("Fallback fetch also failed for %s: %s", device_id, fallback_err)
+                    raise fallback_err
+            
             history = _build_history(raw_data)
-
+            
+            # Log for debugging
+            logging.info("Fetched %d history points for device %s, period %s", len(history), device_id, period)
+            
+            # For day view, fill missing hours from start of day to current hour (inclusive)
+            if period == "day":
+                # Create hourly slots from 00:00 today to current hour
+                day_start = start_time
+                current_hour = now.hour
+                filled_history = {}
+                
+                # Initialize hours from 00:00 to current hour (inclusive)
+                # This ensures biểu đồ kéo dài khi có dữ liệu mới ở giờ tiếp theo
+                for hour_offset in range(current_hour + 1):
+                    hour_time = day_start + timedelta(hours=hour_offset)
+                    hour_key = hour_time.replace(minute=0, second=0, microsecond=0).isoformat()
+                    filled_history[hour_key] = {
+                        "timestamp": hour_key,
+                        "power": 0.0,
+                        "voltage": 0.0,
+                        "current": 0.0,
+                        "energy": 0.0,
+                    }
+                
+                # Fill in actual data
+                for point in history:
+                    ts = datetime.fromisoformat(point["timestamp"])
+                    hour_key = ts.replace(minute=0, second=0, microsecond=0).isoformat()
+                    if hour_key in filled_history:
+                        filled_history[hour_key] = point
+                
+                # Convert back to list, sorted by time
+                history = sorted(filled_history.values(), key=lambda x: x["timestamp"])
+                logging.info(
+                    "Filled day view for hours 00-%d (current hour): %d points, now=%s",
+                    current_hour, len(history), now.isoformat()
+                )
+            
+            # Downsample if needed (keep only up to limit points)
             if len(history) > limit:
                 step = max(1, len(history) // limit)
                 history = history[::step][:limit]
+                logging.info("Downsampled to %d points", len(history))
 
             logging.info("Returning %s history points for device %s", len(history), device_id)
             return jsonify(
@@ -1516,8 +1700,17 @@ def register_routes(app, socketio):
             if not device_ids:
                 device_ids = shared.get_devices_from_group()
 
-            # Aggregate hourly average power across devices from CoreIoT, then convert to kWh.
-            totals_by_hour_ts: dict[int, float] = {}
+            # Determine aggregation interval based on period
+            # Day: hourly, Week/Month: daily
+            if period == "day":
+                interval_ms = 3600000  # 1 hour
+                is_hourly = True
+            else:  # week or month
+                interval_ms = 86400000  # 1 day
+                is_hourly = False
+
+            # Aggregate power data across devices from CoreIoT, then convert to kWh.
+            totals_by_interval_ts: dict[int, float] = {}
             for device_id in device_ids:
                 try:
                     url = f"{shared.CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/values/timeseries"
@@ -1527,7 +1720,7 @@ def register_routes(app, socketio):
                         "endTs": end_ts,
                         "limit": 10000,
                         "agg": "AVG",
-                        "interval": 3600000,
+                        "interval": interval_ms,
                     }
                     resp = requests.get(url, headers=shared.HEADERS, params=params, timeout=20)
                     resp.raise_for_status()
@@ -1541,23 +1734,45 @@ def register_routes(app, socketio):
                             power_w = float(entry.get("value") or 0.0)
                         except (TypeError, ValueError):
                             continue
-                        dt_hour = datetime.fromtimestamp(ts / 1000).replace(minute=0, second=0, microsecond=0)
-                        hour_ts = int(dt_hour.timestamp() * 1000)
-                        totals_by_hour_ts[hour_ts] = totals_by_hour_ts.get(hour_ts, 0.0) + max(0.0, power_w)
+                        # For hourly: group by hour; for daily: group by day
+                        if is_hourly:
+                            dt_interval = datetime.fromtimestamp(ts / 1000).replace(minute=0, second=0, microsecond=0)
+                        else:
+                            dt_interval = datetime.fromtimestamp(ts / 1000).replace(hour=0, minute=0, second=0, microsecond=0)
+                        interval_ts = int(dt_interval.timestamp() * 1000)
+                        # Average power over interval (in watts); for daily interval, CoreIoT returns daily average
+                        # Convert: power_w × interval_hours / 1000 = kWh
+                        interval_hours = (interval_ms / 3600000)
+                        kwh_interval = (power_w * interval_hours) / 1000.0
+                        totals_by_interval_ts[interval_ts] = totals_by_interval_ts.get(interval_ts, 0.0) + max(0.0, kwh_interval)
                 except Exception as e:
                     logging.warning("Energy aggregation skipped device %s due to error: %s", device_id, e)
 
+            # Calculate total kWh and apply tiered pricing
+            total_kwh = sum(totals_by_interval_ts.values())
+            total_cost = calculate_vietnam_electricity_bill(total_kwh) if total_kwh > 0 else 0.0
+            avg_price_per_kwh = total_cost / total_kwh if total_kwh > 0 else 0.0
+
+            # Generate response with all intervals (fill missing with 0)
             response_data = []
-            for ts in sorted(totals_by_hour_ts.keys()):
-                dt_obj = datetime.fromtimestamp(ts / 1000)
-                kwh = totals_by_hour_ts[ts] / 1000.0
-                response_data.append(
-                    {
-                        "timestamp": dt_obj.isoformat(),
-                        "consumption": round(max(0.0, kwh), 6),
-                        "cost": round(max(0.0, kwh) * PRICE_PER_KWH, 2),
-                    }
-                )
+            if totals_by_interval_ts:
+                sorted_ts = sorted(totals_by_interval_ts.keys())
+                first_ts = sorted_ts[0]
+                last_ts = sorted_ts[-1]
+                
+                # Generate all intervals from first to last
+                current_ts = first_ts
+                while current_ts <= last_ts:
+                    kwh = totals_by_interval_ts.get(current_ts, 0.0)
+                    dt_obj = datetime.fromtimestamp(current_ts / 1000)
+                    response_data.append(
+                        {
+                            "timestamp": dt_obj.isoformat(),
+                            "consumption": round(max(0.0, kwh), 6),
+                            "cost": round(max(0.0, kwh) * avg_price_per_kwh, 2),
+                        }
+                    )
+                    current_ts += interval_ms
 
             # If upstream telemetry is unavailable, keep backward-compatible fallback.
             if not response_data:
@@ -1565,25 +1780,55 @@ def register_routes(app, socketio):
                     sorted_items = sorted(shared.hourly_kwh_global.items(), key=lambda x: x[0])
                     recent_items = sorted_items[-750:]
 
-                    for iso_ts, kwh in recent_items:
-                        try:
-                            dt_obj = datetime.fromisoformat(iso_ts)
-                            if dt_obj >= start_time:
-                                response_data.append(
-                                    {
-                                        "timestamp": iso_ts,
-                                        "consumption": kwh,
-                                        "cost": kwh * PRICE_PER_KWH,
-                                    }
-                                )
-                        except ValueError:
-                            continue
+                    # Calculate total kWh from fallback data
+                    total_kwh_fallback = sum((kwh for _, kwh in recent_items if datetime.fromisoformat(_) >= start_time))
+                    total_cost_fallback = calculate_vietnam_electricity_bill(total_kwh_fallback) if total_kwh_fallback > 0 else 0.0
+                    avg_price_fallback = total_cost_fallback / total_kwh_fallback if total_kwh_fallback > 0 else 0.0
+
+                    # Aggregate by period if needed
+                    if period != "day":
+                        daily_map: dict[str, float] = {}
+                        for iso_ts, kwh in recent_items:
+                            try:
+                                dt_obj = datetime.fromisoformat(iso_ts)
+                                if dt_obj >= start_time:
+                                    day_key = dt_obj.strftime("%Y-%m-%d")
+                                    daily_map[day_key] = daily_map.get(day_key, 0.0) + kwh
+                            except ValueError:
+                                continue
+                        
+                        for day_key in sorted(daily_map.keys()):
+                            kwh_daily = daily_map[day_key]
+                            response_data.append(
+                                {
+                                    "timestamp": day_key + "T00:00:00",
+                                    "consumption": round(kwh_daily, 6),
+                                    "cost": round(kwh_daily * avg_price_fallback, 2),
+                                }
+                            )
+                    else:
+                        for iso_ts, kwh in recent_items:
+                            try:
+                                dt_obj = datetime.fromisoformat(iso_ts)
+                                if dt_obj >= start_time:
+                                    response_data.append(
+                                        {
+                                            "timestamp": iso_ts,
+                                            "consumption": kwh,
+                                            "cost": round(kwh * avg_price_fallback, 2),
+                                        }
+                                    )
+                            except ValueError:
+                                continue
 
             return jsonify(response_data)
 
         @app.route("/energy/summary", methods=["GET"])
         def get_energy_summary():
-            """Return CoreIoT latest cumulative total (ENERGY-Total) for Energy page summary cards."""
+            """Return energy summary for Energy page cards.
+            For 'day': Calculate from hourly telemetry (ENERGY-Power) like the chart
+            For 'month': Use cumulative total (ENERGY-Total)
+            """
             period = request.args.get("period", "month")
 
             if period not in ["day", "month"]:
@@ -1594,24 +1839,59 @@ def register_routes(app, socketio):
                 device_ids = shared.get_devices_from_group()
 
             total_kwh = 0.0
-            metric_key = "ENERGY-Today" if period == "day" else "ENERGY-Total"
-            for device_id in device_ids:
-                try:
-                    url = (
-                        f"{shared.CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/"
-                        f"values/timeseries?keys={metric_key}&limit=1"
-                    )
-                    resp = requests.get(url, headers=shared.HEADERS, timeout=20)
-                    resp.raise_for_status()
-                    raw = resp.json()
-                    entries = raw.get(metric_key, [])
-                    if entries:
-                        total_kwh += float(entries[0].get("value") or 0.0)
-                except Exception as e:
-                    logging.warning("Energy summary skipped device %s due to error: %s", device_id, e)
+
+            if period == "day":
+                # For 'day': Calculate from hourly power data (ENERGY-Power) to be consistent with chart
+                now = datetime.now()
+                start_of_today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                start_ts = int(start_of_today.timestamp() * 1000)
+                end_ts = int(now.timestamp() * 1000)
+
+                for device_id in device_ids:
+                    try:
+                        url = f"{shared.CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/values/timeseries"
+                        params = {
+                            "keys": "ENERGY-Power",
+                            "startTs": start_ts,
+                            "endTs": end_ts,
+                            "limit": 10000,
+                            "agg": "AVG",
+                            "interval": 3600000,  # hourly
+                        }
+                        resp = requests.get(url, headers=shared.HEADERS, params=params, timeout=20)
+                        resp.raise_for_status()
+                        raw = resp.json()
+
+                        for entry in raw.get("ENERGY-Power", []):
+                            try:
+                                power_w = float(entry.get("value") or 0.0)
+                                # Convert: power [W] × 1 hour / 1000 = kWh
+                                kwh_hour = max(0.0, power_w) / 1000.0
+                                total_kwh += kwh_hour
+                            except (TypeError, ValueError):
+                                continue
+                    except Exception as e:
+                        logging.warning("Energy summary (day) skipped device %s due to error: %s", device_id, e)
+
+            else:
+                # For 'month': Use ENERGY-Total (cumulative total for the month)
+                for device_id in device_ids:
+                    try:
+                        url = (
+                            f"{shared.CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/"
+                            f"values/timeseries?keys=ENERGY-Total&limit=1"
+                        )
+                        resp = requests.get(url, headers=shared.HEADERS, timeout=20)
+                        resp.raise_for_status()
+                        raw = resp.json()
+                        entries = raw.get("ENERGY-Total", [])
+                        if entries:
+                            total_kwh += float(entries[0].get("value") or 0.0)
+                    except Exception as e:
+                        logging.warning("Energy summary (month) skipped device %s due to error: %s", device_id, e)
 
             total_kwh = round(max(0.0, total_kwh), 4)
-            total_cost = round(total_kwh * PRICE_PER_KWH, 2)
+            total_cost = round(calculate_vietnam_electricity_bill(total_kwh), 2)
             return jsonify(
                 {
                     "status": "success",

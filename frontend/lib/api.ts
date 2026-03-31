@@ -267,12 +267,10 @@ export async function fetchEnergyData(
     const response = await fetch(`${API_BASE_URL}/energy?period=${period}`);
     if (!response.ok) throw new Error("Failed to fetch energy data");
     
-    let data: EnergyData[] = await response.json();
+    const data: EnergyData[] = await response.json();
     
-    // For week/month views, aggregate hourly data into daily totals
-    if ((period === 'week' || period === 'month') && data.length > 50) {
-      data = aggregateEnergyDataByDay(data);
-    }
+    // Backend now handles aggregation (hourly for day, daily for week/month)
+    // No need for frontend aggregation
     
     return data;
   } catch (error) {
@@ -333,7 +331,41 @@ export async function addCircuitBreaker(
   }
 }
 
-// Delete Circuit Breaker
+// Update Circuit Breaker
+export async function updateCircuitBreaker(
+  deviceId: string,
+  cbData: CircuitBreakerInput
+): Promise<{ success: boolean; message?: string; device?: Device }> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/devices/cb/${deviceId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(cbData),
+    });
+
+    const result = await response.json();
+
+    if (!response.ok) {
+      return {
+        success: false,
+        message: result.message || "Không thể cập nhật CB",
+      };
+    }
+
+    return {
+      success: true,
+      message: "Cập nhật CB thành công",
+      device: result.device,
+    };
+  } catch (error) {
+    console.error("Error updating circuit breaker:", error);
+    return {
+      success: false,
+      message: "Lỗi kết nối server",
+    };
+  }
+}
+
 export async function deleteCircuitBreaker(
   deviceId: string
 ): Promise<{ success: boolean; message?: string }> {

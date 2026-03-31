@@ -229,6 +229,7 @@ export default function DeviceDetailPage() {
                 color="#3b82f6"
                 unit="W"
                 isLoading={historyLoading}
+                period={historyPeriod}
               />
             </CardContent>
           </Card>
@@ -247,6 +248,7 @@ export default function DeviceDetailPage() {
                 color="#10b981"
                 unit="V"
                 isLoading={historyLoading}
+                period={historyPeriod}
               />
             </CardContent>
           </Card>
@@ -265,6 +267,7 @@ export default function DeviceDetailPage() {
                 color="#f59e0b"
                 unit="A"
                 isLoading={historyLoading}
+                period={historyPeriod}
               />
             </CardContent>
           </Card>
@@ -283,6 +286,7 @@ export default function DeviceDetailPage() {
                 color="#8b5cf6"
                 unit="kWh"
                 isLoading={historyLoading}
+                period={historyPeriod}
               />
             </CardContent>
           </Card>

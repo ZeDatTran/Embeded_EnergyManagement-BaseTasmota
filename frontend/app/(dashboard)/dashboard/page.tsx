@@ -5,14 +5,14 @@ import { StatCard } from "@/components/dashboard/stat-card";
 import { DeviceStatusCard } from "@/components/dashboard/device-status-card";
 import { AddCBDialog } from "@/components/dashboard/add-cb-dialog";
 import { Icons } from "@/components/icons";
-import { fetchDevices, controlAllDevices, type Device } from "@/lib/api"
-import { Button } from "@/components/ui/button"
+import { fetchDevices, controlAllDevices, type Device } from "@/lib/api";
+import { Button } from "@/components/ui/button";
 import { useSocket } from "@/context/SocketContext";
 
 export default function DashboardPage() {
   const [devices, setDevices] = useState<Device[]>([]);
   const [loading, setLoading] = useState(true);
-  const [controlling, setControlling] = useState(false)
+  const [controlling, setControlling] = useState(false);
   const { socket, isConnected } = useSocket();
 
   const isFetching = useRef(false);
@@ -44,7 +44,21 @@ export default function DashboardPage() {
     socket.emit("join_dashboard");
     console.log("Dashboard: Joined dashboard room");
 
-    // Listen for realtime updates
+    const handleDeviceAdded = () => {
+      console.log("Device added - refreshing device list");
+      loadDevices(false);
+    };
+
+    const handleDeviceRemoved = () => {
+      console.log("Device removed - refreshing device list");
+      loadDevices(false);
+    };
+
+    const handleDeviceUpdated = () => {
+      console.log("Device updated - refreshing device list");
+      loadDevices(false);
+    };
+
     const handleDashboardUpdate = (payload: any) => {
       console.log("Dashboard update received:", payload);
 
@@ -118,39 +132,45 @@ export default function DashboardPage() {
     };
 
     socket.on("dashboard_update", handleDashboardUpdate);
+    socket.on("device_added", handleDeviceAdded);
+    socket.on("device_removed", handleDeviceRemoved);
+    socket.on("device_updated", handleDeviceUpdated);
 
     return () => {
       socket.off("dashboard_update", handleDashboardUpdate);
+      socket.off("device_added", handleDeviceAdded);
+      socket.off("device_removed", handleDeviceRemoved);
+      socket.off("device_updated", handleDeviceUpdated);
     };
   }, [socket, isConnected]);
 
   const handleTurnOnAll = async () => {
-    setControlling(true)
-    const results = await controlAllDevices("ON")
+    setControlling(true);
+    const results = await controlAllDevices("ON");
     if (results.length > 0) {
       setDevices((prevDevices) =>
         prevDevices.map((device) => {
-          const result = results.find((r) => r.id === device.id)
-          return result ? { ...device, isOn: true } : device
+          const result = results.find((r) => r.id === device.id);
+          return result ? { ...device, isOn: true } : device;
         }),
-      )
+      );
     }
-    setControlling(false)
-  }
+    setControlling(false);
+  };
 
   const handleTurnOffAll = async () => {
-    setControlling(true)
-    const results = await controlAllDevices("OFF")
+    setControlling(true);
+    const results = await controlAllDevices("OFF");
     if (results.length > 0) {
       setDevices((prevDevices) =>
         prevDevices.map((device) => {
-          const result = results.find((r) => r.id === device.id)
-          return result ? { ...device, isOn: false } : device
+          const result = results.find((r) => r.id === device.id);
+          return result ? { ...device, isOn: false } : device;
         }),
-      )
+      );
     }
-    setControlling(false)
-  }
+    setControlling(false);
+  };
 
   const onlineDevices = devices.filter((d) => d.status === "online").length;
   const activeDevices = devices.filter((d) => d.isOn).length;
@@ -242,6 +262,7 @@ export default function DashboardPage() {
             <DeviceStatusCard
               key={device.id}
               device={device}
+              onRefresh={() => loadDevices(false)}
             />
           ))}
         </div>

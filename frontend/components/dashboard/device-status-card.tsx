@@ -1,16 +1,66 @@
 "use client";
 
+import { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Icons } from "@/components/icons";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { EditCBDialog } from "./edit-cb-dialog";
 import type { Device } from "@/lib/api";
+import { deleteCircuitBreaker } from "@/lib/api";
+import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 
 interface DeviceStatusCardProps {
-  device: Device
+  device: Device;
+  onRefresh?: () => void;
 }
 
-export function DeviceStatusCard({ device }: DeviceStatusCardProps) {
+export function DeviceStatusCard({ device, onRefresh }: DeviceStatusCardProps) {
+  const [editOpen, setEditOpen] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const { toast } = useToast();
+
+  const handleDelete = async () => {
+    setDeleting(true);
+    try {
+      const result = await deleteCircuitBreaker(device.id);
+      if (result.success) {
+        toast({
+          title: "Thành công",
+          description: `Đã xóa CB "${device.name}"`,
+        });
+        setDeleteDialogOpen(false);
+        onRefresh?.();
+      } else {
+        toast({
+          title: "Lỗi",
+          description: result.message || "Không thể xóa CB",
+          variant: "destructive",
+        });
+      }
+    } catch (error) {
+      console.error("Error deleting CB:", error);
+      toast({
+        title: "Lỗi",
+        description: "Có lỗi xảy ra khi xóa CB",
+        variant: "destructive",
+      });
+    } finally {
+      setDeleting(false);
+    }
+  };
   // Lấy icon dựa trên type hoặc roomType, mặc định là cb
   const getDeviceIcon = () => {
     // Nếu có roomType, ưu tiên dùng icon phòng
@@ -47,17 +97,40 @@ export function DeviceStatusCard({ device }: DeviceStatusCardProps) {
               <p className="text-xs text-muted-foreground">{device.location}</p>
             </div>
           </div>
-          <Badge
-            variant={device.status === "online" ? "default" : "secondary"}
-            className="text-xs"
-          >
-            {device.status === "online" ? (
-              <Icons.online className="mr-1 h-3 w-3" />
-            ) : (
-              <Icons.offline className="mr-1 h-3 w-3" />
-            )}
-            {device.status === "online" ? "Online" : "Offline"}
-          </Badge>
+          <div className="flex items-center gap-2">
+            <Badge
+              variant={device.status === "online" ? "default" : "secondary"}
+              className="text-xs"
+            >
+              {device.status === "online" ? (
+                <Icons.online className="mr-1 h-3 w-3" />
+              ) : (
+                <Icons.offline className="mr-1 h-3 w-3" />
+              )}
+              {device.status === "online" ? "Online" : "Offline"}
+            </Badge>
+            {/* Edit and Delete buttons */}
+            <div className="flex items-center gap-1">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setEditOpen(true)}
+                className="h-6 w-6 p-0"
+                title="Chỉnh sửa CB"
+              >
+                <Icons.edit className="h-4 w-4" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setDeleteDialogOpen(true)}
+                className="h-6 w-6 p-0 text-destructive hover:text-destructive"
+                title="Xóa CB"
+              >
+                <Icons.trash className="h-4 w-4" />
+              </Button>
+            </div>
+          </div>
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -122,6 +195,32 @@ export function DeviceStatusCard({ device }: DeviceStatusCardProps) {
           </Badge>
         </div>
       </CardContent>
+      <EditCBDialog
+        device={device}
+        open={editOpen}
+        onOpenChange={setEditOpen}
+        onSuccess={onRefresh}
+      />
+      <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Xác nhận xóa CB</AlertDialogTitle>
+            <AlertDialogDescription>
+              Bạn có chắc chắn muốn xóa CB "{device.name}"? Hành động này không thể hoàn tác.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleting}>Hủy</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleDelete}
+              disabled={deleting}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {deleting ? "Đang xóa..." : "Xóa"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Card>
   );
 }
