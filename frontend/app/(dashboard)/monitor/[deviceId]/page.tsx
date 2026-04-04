@@ -23,6 +23,7 @@ export default function DeviceDetailPage() {
     chunkDays: 3,
     maxPages: 50,
   })
+  const { data: dayHistory } = useDeviceHistory(deviceId, "day")
   const { mutate: updateDevice, isPending } = useUpdateDevice()
   const [isToggling, setIsToggling] = useState(false)
 
@@ -70,6 +71,9 @@ export default function DeviceDetailPage() {
   const energyToday = parseFloat(String(telemetry["ENERGY-Today"] ?? "0"))
   const energyTotal = parseFloat(String(telemetry["ENERGY-Total"] ?? "0"))
   const powerFactor = parseFloat(String(telemetry["ENERGY-Factor"] ?? "0"))
+  const energyTodayFromHistory =
+    (dayHistory || []).reduce((sum, item) => sum + Number(item.energy || 0), 0)
+  const energyTodayDisplay = energyTodayFromHistory > 0 ? energyTodayFromHistory : energyToday
 
   return (
     <div className="space-y-6">
@@ -158,7 +162,7 @@ export default function DeviceDetailPage() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <p className="text-2xl font-bold">{energyToday.toFixed(3)} kWh</p>
+            <p className="text-2xl font-bold">{energyTodayDisplay.toFixed(3)} kWh</p>
           </CardContent>
         </Card>
 

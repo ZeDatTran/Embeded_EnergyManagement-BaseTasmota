@@ -3,7 +3,6 @@ import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
-from sklearn.neural_network import MLPRegressor
 from sklearn.metrics import mean_squared_error, r2_score
 import xgboost as xgb
 try:
@@ -46,6 +45,22 @@ def create_advanced_features(df):
     Enhanced feature engineering with more sophisticated time series features
     """
     df = df.copy()
+
+    # ===== EXPLICIT LINEAR TREND LAYER =====
+    # Build a deterministic time index and estimate a global linear baseline.
+    # The model can then learn deviations from this baseline instead of over-trusting
+    # historically high absolute levels.
+    df['time_idx'] = np.arange(len(df), dtype=float)
+    if len(df) >= 2:
+        trend_slope, trend_intercept = np.polyfit(df['time_idx'], df['kwh_hour'].astype(float), 1)
+    elif len(df) == 1:
+        trend_slope, trend_intercept = 0.0, float(df['kwh_hour'].iloc[0])
+    else:
+        trend_slope, trend_intercept = 0.0, 0.0
+
+    df['linear_trend'] = trend_slope * df['time_idx'] + trend_intercept
+    df['kwh_detrended'] = df['kwh_hour'] - df['linear_trend']
+    df['trend_slope'] = trend_slope
     
     # ===== TEMPORAL FEATURES =====
     df['hour'] = df.index.hour
@@ -78,6 +93,12 @@ def create_advanced_features(df):
     # ===== TREND FEATURES (NEW) =====
     df['kwh_trend_24h'] = (df['kwh_hour'].shift(24) - df['kwh_hour'].shift(48)) / (df['kwh_hour'].shift(48) + 0.01)
     df['kwh_trend_168h'] = (df['kwh_lag_168h'] - df['kwh_lag_336h']) / (df['kwh_lag_336h'] + 0.01)
+
+    # ===== DETRENDED FEATURES (NEW) =====
+    df['kwh_detrended_lag_24h'] = df['kwh_detrended'].shift(24)
+    df['kwh_detrended_lag_168h'] = df['kwh_detrended'].shift(168)
+    df['kwh_detrended_roll_mean_24h'] = df['kwh_detrended'].shift(24).rolling(window=24).mean()
+    df['kwh_detrended_roll_std_24h'] = df['kwh_detrended'].shift(24).rolling(window=24).std()
     
     # ===== INTERACTION FEATURES (NEW) =====
     df['hour_kwh_interaction'] = df['hour'] * df['kwh_lag_24h']
@@ -265,8 +286,11 @@ def train_improved_models():
             "Increase COREIOT_LOOKBACK_DAYS or ensure denser telemetry."
         )
     
-    # Define features (exclude target)
-    FEATURES = [col for col in df_features.columns if col != 'kwh_hour']
+    # Define features (exclude target + helper columns that are not available at inference time)
+    FEATURES = [
+        col for col in df_features.columns
+        if col not in {'kwh_hour', 'kwh_detrended'}
+    ]
     TARGET = 'kwh_hour'
     
     X = df_features[FEATURES]
@@ -291,35 +315,69 @@ def train_improved_models():
     
     scores = {}
     
-    # [1] XGBoost - TUNED
-    print("\n  [1/4] Training XGBoost (Tuned)...")
-    model_xgb = xgb.XGBRegressor(
-        n_estimators=400,      # ⬆️ Increased
-        learning_rate=0.015,   # ⬇️ Finer tuning
-        max_depth=7,           # ⬇️ Slightly reduced to avoid overfitting
-        min_child_weight=1,    # NEW
-        subsample=0.8,         # NEW: Dropout for trees
-        colsample_bytree=0.8,  # NEW: Feature sampling
-        gamma=1,               # NEW: Regularization
-        reg_alpha=0.5,         # NEW: L1 regularization
-        reg_lambda=1,          # NEW: L2 regularization
-        random_state=42,
-        n_jobs=-1,
-        verbose=0
-    )
+    # [1] XGBoost - TUNED (with anti-collapse fallback)
+    print("\n  [1/3] Training XGBoost (Tuned)...")
+    xgb_params_primary = {
+        "n_estimators": 400,
+        "learning_rate": 0.015,
+        "max_depth": 7,
+        "min_child_weight": 1,
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+        "gamma": 1,
+        "reg_alpha": 0.5,
+        "reg_lambda": 1,
+        "objective": "reg:squarederror",
+        "eval_metric": "rmse",
+        "random_state": 42,
+        "n_jobs": -1,
+        "verbosity": 0,
+    }
+    model_xgb = xgb.XGBRegressor(**xgb_params_primary)
     model_xgb.fit(X_train, y_train)
-    joblib.dump(model_xgb, MODELS_DIR / "model_xgb_improved.pkl")
+
     y_pred_xgb_train = model_xgb.predict(X_train)
     y_pred_xgb_test = model_xgb.predict(X_test)
+    xgb_train_r2 = r2_score(y_train, y_pred_xgb_train)
+    xgb_test_r2 = r2_score(y_test, y_pred_xgb_test)
+    xgb_pred_std = float(np.std(y_pred_xgb_test))
+
+    # Auto-retrain if XGBoost collapses to near-constant predictions or severe underfit.
+    if xgb_pred_std < 1e-6 or (xgb_train_r2 < 0.1 and xgb_test_r2 < 0.1):
+        print("     XGBoost appears underfit/collapsed -> retry with relaxed params...")
+        xgb_params_fallback = {
+            "n_estimators": 700,
+            "learning_rate": 0.03,
+            "max_depth": 6,
+            "min_child_weight": 1,
+            "subsample": 0.9,
+            "colsample_bytree": 0.9,
+            "gamma": 0,
+            "reg_alpha": 0,
+            "reg_lambda": 1,
+            "objective": "reg:squarederror",
+            "eval_metric": "rmse",
+            "random_state": 42,
+            "n_jobs": -1,
+            "verbosity": 0,
+        }
+        model_xgb = xgb.XGBRegressor(**xgb_params_fallback)
+        model_xgb.fit(X_train, y_train)
+        y_pred_xgb_train = model_xgb.predict(X_train)
+        y_pred_xgb_test = model_xgb.predict(X_test)
+        xgb_train_r2 = r2_score(y_train, y_pred_xgb_train)
+        xgb_test_r2 = r2_score(y_test, y_pred_xgb_test)
+
+    joblib.dump(model_xgb, MODELS_DIR / "model_xgb_improved.pkl")
     scores['XGBoost'] = {
-        'train': r2_score(y_train, y_pred_xgb_train),
-        'test': r2_score(y_test, y_pred_xgb_test),
+        'train': xgb_train_r2,
+        'test': xgb_test_r2,
         'rmse': np.sqrt(mean_squared_error(y_test, y_pred_xgb_test))
     }
     print(f"     Train R²: {scores['XGBoost']['train']:.4f} | Test R²: {scores['XGBoost']['test']:.4f}")
     
     # [2] Random Forest - TUNED
-    print("  [2/4] Training Random Forest (Tuned)...")
+    print("  [2/3] Training Random Forest (Tuned)...")
     model_rf = RandomForestRegressor(
         n_estimators=150,      # ⬆️ Increased
         max_depth=18,          # Slightly deeper
@@ -342,7 +400,7 @@ def train_improved_models():
     print(f"     Train R²: {scores['RandomForest']['train']:.4f} | Test R²: {scores['RandomForest']['test']:.4f}")
     
     # [3] CatBoost - robust on small/medium tabular data
-    print("  [3/4] Training CatBoost...")
+    print("  [3/3] Training CatBoost...")
     cat_path = MODELS_DIR / "model_cat_improved.pkl"
     if HAS_CATBOOST:
         try:
@@ -383,55 +441,10 @@ def train_improved_models():
             'rmse': float('nan')
         }
 
-    # [4] MLP - TUNED
-    print("  [4/4] Training Neural Network (MLP)...")
     mlp_path = MODELS_DIR / "model_mlp_improved.pkl"
-    use_mlp = total_hours >= 500
-
-    if not use_mlp:
-        print(f"     Skipped MLP: raw history {total_hours}h < 500h threshold.")
-        if mlp_path.exists():
-            mlp_path.unlink()
-            print("     Removed stale model_mlp_improved.pkl to keep ensemble RF+XGB only.")
-        scores['MLP'] = {
-            'train': float('nan'),
-            'test': float('nan'),
-            'rmse': float('nan')
-        }
-    elif len(X_train) < 10:
-        print("     Skipped MLP: training set too small for stable neural net training.")
-        if mlp_path.exists():
-            mlp_path.unlink()
-            print("     Removed stale model_mlp_improved.pkl to avoid accidental loading.")
-        scores['MLP'] = {
-            'train': float('nan'),
-            'test': float('nan'),
-            'rmse': float('nan')
-        }
-    else:
-        mlp_early_stopping = len(X_train) >= 30
-        model_mlp = MLPRegressor(
-            hidden_layer_sizes=(128, 64, 32, 16),
-            max_iter=500,
-            learning_rate_init=0.001,
-            activation='relu',
-            alpha=0.001,
-            early_stopping=mlp_early_stopping,
-            validation_fraction=0.2 if mlp_early_stopping else 0.0,
-            n_iter_no_change=50,
-            random_state=42,
-            verbose=0
-        )
-        model_mlp.fit(X_train, y_train)
-        joblib.dump(model_mlp, mlp_path)
-        y_pred_mlp_train = model_mlp.predict(X_train)
-        y_pred_mlp_test = model_mlp.predict(X_test)
-        scores['MLP'] = {
-            'train': r2_score(y_train, y_pred_mlp_train),
-            'test': r2_score(y_test, y_pred_mlp_test),
-            'rmse': np.sqrt(mean_squared_error(y_test, y_pred_mlp_test))
-        }
-        print(f"     Train R²: {scores['MLP']['train']:.4f} | Test R²: {scores['MLP']['test']:.4f}")
+    if mlp_path.exists():
+        mlp_path.unlink()
+        print("  Removed stale model_mlp_improved.pkl (MLP disabled).")
     
     # Print summary
     print("\n" + "="*60)

@@ -100,42 +100,113 @@ if FORECAST_ENABLED:
     previous_energy = {}
     hourly_kwh_global = {}
     predicted_details_cache = {}
+    monthly_boundaries = {}  # 'YYYY-MM': {'consumed_kwh': float, 'bill_vnd': float, 'closed': bool}
     lock = threading.Lock()
 
-    def process_new_energy(device_id, total_energy_str, ts_iso):
-        """Calculate hourly kWh from ENERGY-Total and save to DB."""
-        global hourly_kwh_global, previous_energy
-        try:
-            total_energy = float(total_energy_str)
-            ts = datetime.fromisoformat(ts_iso.replace("Z", "+00:00")).replace(tzinfo=None)
-        except Exception:
-            return
+def process_new_energy(device_id, total_energy_str, ts_iso):
+    """Calculate hourly kWh from ENERGY-Total. Handle monthly boundaries."""
+    global hourly_kwh_global, previous_energy, monthly_boundaries
+    try:
+        total_energy = float(total_energy_str)
+        ts = datetime.fromisoformat(ts_iso.replace("Z", "+00:00")).replace(tzinfo=None)
+    except Exception:
+        return
 
-        with lock:
-            key = ts.strftime("%Y-%m-%dT%H:00:00")
-            prev = previous_energy.get(device_id)
+    current_month_key = ts.strftime("%Y-%m")
+    with lock:
+        # Check monthly boundary crossing
+        if current_month_key not in monthly_boundaries:
+            monthly_boundaries[current_month_key] = {
+                'start_ts': int(ts.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000),
+                'consumed_kwh': 0.0,
+                'bill_vnd': 0.0,
+                'closed': False
+            }
+            logging.info(f"New month initialized: {current_month_key}")
 
-            if prev:
-                prev_ts, prev_val = prev
-                if prev_ts.hour != ts.hour or prev_ts.date() != ts.date():
-                    delta = total_energy - prev_val
-                    if delta < 0:
-                        delta = total_energy
+        # Previous month closeout logic
+        prev_month_key = (ts.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+        if prev_month_key in monthly_boundaries and not monthly_boundaries[prev_month_key]['closed']:
+            prev_month_consumed = sum(
+                v for k, v in hourly_kwh_global.items() 
+                if k.startswith(prev_month_key)
+            )
+            monthly_boundaries[prev_month_key] = {
+                    'consumed_kwh': round(prev_month_consumed, 2),
+                    'bill_vnd': 0.0,  # Calculate in api.py when needed
+                    'closed': True
+            }
+            logging.info(f"Closed previous month {prev_month_key}: {prev_month_consumed:.2f} kWh, Bill: {monthly_boundaries[prev_month_key]['bill_vnd']:,} VND")
 
-                    hourly_kwh_global[key] = hourly_kwh_global.get(key, 0.0) + round(delta, 4)
-                    save_hourly_kwh(key, hourly_kwh_global[key])
-                    save_plug_hourly_energy(device_id, key, round(delta, 4), source="coreiot")
+        key = ts.strftime("%Y-%m-%dT%H:00:00")
+        prev = previous_energy.get(device_id)
 
-                    if key in predicted_details_cache:
-                        forecast_client.send_feedback(
-                            {key: predicted_details_cache[key]},
-                            {key: hourly_kwh_global[key]},
-                        )
-                        del predicted_details_cache[key]
+        if prev:
+            prev_ts, prev_val = prev
+            gap_seconds = (ts - prev_ts).total_seconds()
+            gap_minutes = gap_seconds / 60
+            is_new_day = ts.date() > prev_ts.date()
+            is_long_gap = gap_seconds > 30 * 60  # > 30 minutes
+            
+            delta = total_energy - prev_val
+            
+            # Decision logic for delta calculation
+            if delta < 0:
+                # Device counter reset detected
+                logging.info(
+                    "Device %s counter reset detected (%.6f → %.6f). Setting delta=0.",
+                    device_id, prev_val, total_energy
+                )
+                delta = 0.0
+            elif is_new_day:
+                # Cross day boundary: treat as new period, don't carry delta from yesterday
+                logging.info(
+                    "Device %s new day boundary (%s → %s). Resetting delta to 0.",
+                    device_id, prev_ts.date(), ts.date()
+                )
+                delta = 0.0
+            elif is_long_gap and 0 < delta < 0.05:
+                # Long gap (>30min) but tiny delta (<0.05 kWh): likely register didn't change, duplicate value
+                logging.warning(
+                    "Device %s duplicate register value (gap=%.0fmin, delta=%.6f). Skipping.",
+                    device_id, gap_minutes, delta
+                )
+                delta = 0.0
+            elif is_long_gap:
+                # Long gap but reasonable delta: acknowledge the gap
+                logging.info(
+                    "Device %s long data gap (%.0f min). Delta=%.6f kWh recorded but marked as gap.",
+                    device_id, gap_minutes, delta
+                )
+            else:
+                # Normal case: use calculated delta
+                if delta >= 0:
+                    logging.debug(
+                        "Device %s normal delta (gap=%.0fs): %.6f kWh",
+                        device_id, gap_seconds, delta
+                    )
 
-            previous_energy[device_id] = (ts, total_energy)
+            if delta > 0:
+                hourly_kwh_global[key] = hourly_kwh_global.get(key, 0.0) + round(delta, 4)
+                # Update current month consumed
+                monthly_boundaries[current_month_key]['consumed_kwh'] = sum(
+                    v for k, v in hourly_kwh_global.items() 
+                    if k.startswith(current_month_key)
+                )
 
-    def load_hourly_kwh_from_db():
+                save_hourly_kwh(key, hourly_kwh_global[key])
+                save_plug_hourly_energy(device_id, key, round(delta, 4), source="coreiot")
+
+                if key in predicted_details_cache:
+                    forecast_client.send_feedback(
+                        {key: predicted_details_cache[key]},
+                        {key: hourly_kwh_global[key]},
+                    )
+                    del predicted_details_cache[key]
+
+        previous_energy[device_id] = (ts, total_energy)
+
+def load_hourly_kwh_from_db():
         """Load persisted hourly consumption to in-memory cache (real data only)."""
         logging.info("Loading hourly_kwh history from database...")
         loaded = 0

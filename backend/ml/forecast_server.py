@@ -30,18 +30,50 @@ print("Đã tải Improved Ensemble Model và scaler_improved.pkl.")
 
 # Tên các cột (giống hệt lúc train)
 IMPROVED_FEATURES = [
+    'time_idx', 'linear_trend', 'trend_slope',
     'hour', 'dayofweek', 'month', 'is_weekend', 'quarter', 'is_holiday_period',
     'kwh_lag_1h', 'kwh_lag_24h', 'kwh_lag_48h', 'kwh_lag_168h', 'kwh_lag_336h',
     'kwh_rolling_mean_6h', 'kwh_rolling_std_6h', 'kwh_rolling_min_6h', 'kwh_rolling_max_6h',
     'kwh_rolling_mean_24h', 'kwh_rolling_std_24h', 'kwh_rolling_min_24h', 'kwh_rolling_max_24h',
     'kwh_rolling_mean_48h', 'kwh_rolling_std_48h', 'kwh_rolling_min_48h', 'kwh_rolling_max_48h',
-    'kwh_trend_24h', 'kwh_trend_168h', 'hour_kwh_interaction', 'daytype_kwh_interaction'
+    'kwh_trend_24h', 'kwh_trend_168h',
+    'kwh_detrended_lag_24h', 'kwh_detrended_lag_168h', 'kwh_detrended_roll_mean_24h', 'kwh_detrended_roll_std_24h',
+    'hour_kwh_interaction', 'daytype_kwh_interaction'
 ]
 FEATURES = IMPROVED_FEATURES
 TARGET = 'kwh_hour'
 
 
-def _build_improved_features(forecast_df: pd.DataFrame, ts: pd.Timestamp) -> dict:
+def _fit_linear_trend_params(history_series: pd.Series) -> tuple[float, float, pd.Timestamp]:
+    if history_series.empty:
+        now_ts = pd.Timestamp.now().floor('h')
+        return 0.0, 0.0, now_ts
+
+    first_ts = history_series.index.min().floor('h')
+    values = history_series.astype(float).to_numpy()
+    time_idx = np.arange(len(values), dtype=float)
+
+    if len(values) >= 2:
+        slope, intercept = np.polyfit(time_idx, values, 1)
+    else:
+        slope, intercept = 0.0, float(values[0])
+
+    return float(slope), float(intercept), first_ts
+
+
+def _trend_value_at(ts: pd.Timestamp, slope: float, intercept: float, first_ts: pd.Timestamp) -> tuple[float, float]:
+    hours_from_start = (ts.floor('h') - first_ts).total_seconds() / 3600.0
+    time_idx = max(0.0, hours_from_start)
+    return time_idx, slope * time_idx + intercept
+
+
+def _build_improved_features(
+    forecast_df: pd.DataFrame,
+    ts: pd.Timestamp,
+    trend_slope: float,
+    trend_intercept: float,
+    trend_first_ts: pd.Timestamp,
+) -> dict:
     last_known = float(forecast_df.iloc[-1][TARGET])
 
     def get_lag(hours: int, default_val: float) -> float:
@@ -91,6 +123,27 @@ def _build_improved_features(forecast_df: pd.DataFrame, ts: pd.Timestamp) -> dic
     trend_24 = (lag_24 - lag_48) / (lag_48 + 0.01)
     trend_168 = (lag_168 - lag_336) / (lag_336 + 0.01)
 
+    time_idx, linear_trend = _trend_value_at(ts, trend_slope, trend_intercept, trend_first_ts)
+    _, linear_trend_24 = _trend_value_at(ts - pd.Timedelta(hours=24), trend_slope, trend_intercept, trend_first_ts)
+    _, linear_trend_168 = _trend_value_at(ts - pd.Timedelta(hours=168), trend_slope, trend_intercept, trend_first_ts)
+
+    detrended_lag_24 = lag_24 - linear_trend_24
+    detrended_lag_168 = lag_168 - linear_trend_168
+
+    detrended_values_24 = []
+    for h in range(48, 24, -1):
+        t = ts - pd.Timedelta(hours=h)
+        if t in forecast_df.index:
+            base = float(forecast_df.loc[t][TARGET])
+            _, trend_t = _trend_value_at(t, trend_slope, trend_intercept, trend_first_ts)
+            detrended_values_24.append(base - trend_t)
+    if detrended_values_24:
+        detrended_roll_mean_24 = float(np.mean(detrended_values_24))
+        detrended_roll_std_24 = float(np.std(detrended_values_24)) if len(detrended_values_24) > 1 else 0.0
+    else:
+        detrended_roll_mean_24 = detrended_lag_24
+        detrended_roll_std_24 = 0.0
+
     return {
         'hour': ts.hour,
         'dayofweek': ts.dayofweek,
@@ -98,6 +151,9 @@ def _build_improved_features(forecast_df: pd.DataFrame, ts: pd.Timestamp) -> dic
         'is_weekend': int(ts.dayofweek >= 5),
         'quarter': ((ts.month - 1) // 3) + 1,
         'is_holiday_period': int(ts.month in [1, 12]),
+        'time_idx': time_idx,
+        'linear_trend': linear_trend,
+        'trend_slope': trend_slope,
         'kwh_lag_1h': lag_1,
         'kwh_lag_24h': lag_24,
         'kwh_lag_48h': lag_48,
@@ -117,6 +173,10 @@ def _build_improved_features(forecast_df: pd.DataFrame, ts: pd.Timestamp) -> dic
         'kwh_rolling_max_48h': rolling_max_48,
         'kwh_trend_24h': trend_24,
         'kwh_trend_168h': trend_168,
+        'kwh_detrended_lag_24h': detrended_lag_24,
+        'kwh_detrended_lag_168h': detrended_lag_168,
+        'kwh_detrended_roll_mean_24h': detrended_roll_mean_24,
+        'kwh_detrended_roll_std_24h': detrended_roll_std_24,
         'hour_kwh_interaction': ts.hour * lag_24,
         'daytype_kwh_interaction': int(ts.dayofweek >= 5) * lag_24,
     }
@@ -147,6 +207,7 @@ def calculate_vietnam_electricity_bill(total_kwh):
 # --- Hàm dự báo ---
 async def forecast_with_ensemble(history_df):
     history_df.sort_index(inplace=True)
+    trend_slope, trend_intercept, trend_first_ts = _fit_linear_trend_params(history_df[TARGET])
     start_time = history_df.index.max()
     end_of_month = (start_time + pd.offsets.MonthEnd(0)).floor('h') 
     
@@ -162,7 +223,13 @@ async def forecast_with_ensemble(history_df):
 
     for ts in future_timestamps:
         try:
-            temp_features = _build_improved_features(forecast_df, ts)
+            temp_features = _build_improved_features(
+                forecast_df,
+                ts,
+                trend_slope,
+                trend_intercept,
+                trend_first_ts,
+            )
         except Exception:
             last_known = float(forecast_df.iloc[-1][TARGET])
             temp_features = {k: 0.0 for k in FEATURES}

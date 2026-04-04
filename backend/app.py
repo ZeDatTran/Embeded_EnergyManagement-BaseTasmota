@@ -32,6 +32,12 @@ def start_background_jobs():
 
 
 if __name__ == "__main__":
+    # Configure logging for debug output
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
     print("=" * 60)
     print(" SMART HOME BACKEND - FULL FEATURES")
     print("=" * 60)

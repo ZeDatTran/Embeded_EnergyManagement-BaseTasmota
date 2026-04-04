@@ -24,7 +24,6 @@ class ImprovedModelEnsemble:
         self.rf_model = None
         self.xgb_model = None
         self.cat_model = None
-        self.mlp_model = None
 
         load_errors = []
         optional_missing = []
@@ -46,13 +45,6 @@ class ImprovedModelEnsemble:
         except Exception as e:
             load_errors.append(f"CatBoost: {e}")
 
-        try:
-            self.mlp_model = joblib.load(MODELS_DIR / f"model_mlp{model_suffix}.pkl")
-        except FileNotFoundError:
-            optional_missing.append("MLP")
-        except Exception as e:
-            load_errors.append(f"MLP: {e}")
-
         if optional_missing:
             print(f" Optional models not loaded: {', '.join(optional_missing)}")
 
@@ -61,7 +53,7 @@ class ImprovedModelEnsemble:
             for err in load_errors:
                 print(f"   - {err}")
 
-        if not any([self.rf_model, self.xgb_model, self.cat_model, self.mlp_model]):
+        if not any([self.rf_model, self.xgb_model, self.cat_model]):
             raise FileNotFoundError("No usable improved models could be loaded")
 
         print(" Improved ensemble initialized")
@@ -70,8 +62,7 @@ class ImprovedModelEnsemble:
         self.model_weights = {
             "XGBoost": 0.40,
             "RandomForest": 0.35,
-            "CatBoost": 0.20,
-            "MLP": 0.05,
+            "CatBoost": 0.25,
         }
         
         # Recent predictions history for adaptive tuning
@@ -90,8 +81,6 @@ class ImprovedModelEnsemble:
             preds["RandomForest"] = float(self.rf_model.predict(input_data)[0])
         if self.cat_model is not None:
             preds["CatBoost"] = float(self.cat_model.predict(input_data)[0])
-        if self.mlp_model is not None:
-            preds["MLP"] = float(self.mlp_model.predict(input_data)[0])
 
         if not preds:
             raise RuntimeError("No available model for prediction")
@@ -210,7 +199,7 @@ class ImprovedModelEnsemble:
         if len(predictions) == 0:
             return
         
-        active_models = [k for k in ["XGBoost", "RandomForest", "CatBoost", "MLP"] if k in self.model_weights]
+        active_models = [k for k in ["XGBoost", "RandomForest", "CatBoost"] if k in self.model_weights]
         individual_errors = {name: [] for name in active_models}
         
         for actual, pred_dict in zip(actual_values, predictions):
@@ -255,7 +244,7 @@ def demo_improved_ensemble():
     ensemble = ImprovedModelEnsemble(use_improved=True)
     
     # Create dummy input (would be real scaled features in production)
-    dummy_input = np.random.randn(1, 27)  # 27 features from improved model
+    dummy_input = np.random.randn(1, 34)  # 34 features from improved model
     
     print("\n Getting predictions...")
     result = ensemble.predict_with_confidence(dummy_input)

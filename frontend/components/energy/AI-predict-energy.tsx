@@ -13,6 +13,7 @@ interface ForecastData {
 
 const AI_SERVER_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000"
 const STORAGE_KEY = "ai_forecast_result" // session storage
+const FORECAST_TIMEOUT_MS = 90000
 
 export function AIPredictEnergy() {
     const [forecastData, setForecastData] = useState<ForecastData | null>(null)
@@ -57,7 +58,7 @@ export function AIPredictEnergy() {
 
         try {
             const controller = new AbortController()
-            const timeoutId = setTimeout(() => controller.abort(), 45000)
+            const timeoutId = setTimeout(() => controller.abort(), FORECAST_TIMEOUT_MS)
 
             const res = await fetch(`${AI_SERVER_URL}/forecast`, {
                 method: "GET",
@@ -91,7 +92,7 @@ export function AIPredictEnergy() {
             }
         } catch (error: any) {
             if (error?.name === "AbortError") {
-                setForecastStatus("Lỗi: AI Server phản hồi quá chậm (timeout 45s).")
+                setForecastStatus("Lỗi: AI Server phản hồi quá chậm (timeout 90s).")
             } else {
                 setForecastStatus("Lỗi kết nối tới Server AI!")
             }

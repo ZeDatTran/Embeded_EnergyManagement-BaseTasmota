@@ -13,7 +13,7 @@ interface EnergyStatsProps {
 export function EnergyStats({ data, period, summary }: EnergyStatsProps) {
   const chartTotalConsumption = data.reduce((sum, item) => sum + item.consumption, 0)
   const chartTotalCost = data.reduce((sum, item) => sum + item.cost, 0)
-  const shouldUseSummary = (period === "day" || period === "month") && !!summary
+  const shouldUseSummary = period === "day" && !!summary
   const totalConsumption = shouldUseSummary ? (summary?.totalConsumption || 0) : chartTotalConsumption
   const totalCost = shouldUseSummary ? (summary?.totalCost || 0) : chartTotalCost
   const avgConsumption = totalConsumption / data.length || 0

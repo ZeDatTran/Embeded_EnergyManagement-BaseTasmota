@@ -16,7 +16,15 @@ class ForecastClient:
                     cls._instance = super().__new__(cls)
                     cls._instance.ws = None
                     cls._instance.connected = False
+                    cls._instance.response_timeout_sec = cls._instance._get_response_timeout()
         return cls._instance
+
+    def _get_response_timeout(self):
+        """Use longer, configurable timeout because ensemble forecast can be slow."""
+        try:
+            return max(30.0, float(os.getenv("FORECAST_RESPONSE_TIMEOUT_SEC", "90")))
+        except (TypeError, ValueError):
+            return 90.0
 
     def connect(self):
         if self.ws and self.connected and self.ws.sock and self.ws.sock.fileno() != -1:
@@ -61,7 +69,7 @@ class ForecastClient:
         }
         try:
             ws.send(json.dumps(payload))
-            ws.settimeout(30)
+            ws.settimeout(self.response_timeout_sec)
             resp = ws.recv()
             result = json.loads(resp)
             

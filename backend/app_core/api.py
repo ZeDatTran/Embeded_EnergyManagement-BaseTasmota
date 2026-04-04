@@ -14,13 +14,14 @@ from app_core.analysis_routes import register_analysis_routes
 
 
 def calculate_vietnam_electricity_bill(total_kwh):
+    """Vietnam household electricity tiered pricing + 8% VAT"""
     tiers = [
-        (100, 1984),   # Bậc 1
-        (100, 2050),   # Bậc 2
-        (200, 2380),   # Bậc 3
-        (200, 2998),   # Bậc 4
-        (200, 3350),   # Bậc 5
-        (float('inf'), 3460)  # Bậc 6
+        (100, 1984),   # Bậc 1: 0-50kWh → 1,984đ
+        (100, 2050),   # Bậc 2: 50-100 → 2,050đ  
+        (200, 2380),   # Bậc 3: 100-200 → 2,380đ
+        (200, 2998),   # Bậc 4: 200-400 → 2,998đ
+        (200, 3350),   # Bậc 5: 400-600 → 3,350đ
+        (float('inf'), 3460)  # Bậc 6: >600 → 3,460đ
     ]
     
     bill = 0
@@ -33,7 +34,7 @@ def calculate_vietnam_electricity_bill(total_kwh):
         bill += kwh_in_tier * price
         kwh_remaining -= kwh_in_tier
     
-    return bill * 1.08  # VAT 8%
+    return round(bill * 1.08, 0)  # VAT 8%, round to VND
 
 
 def register_routes(app, socketio):
@@ -415,7 +416,7 @@ def register_routes(app, socketio):
                 "ENERGY-Power": "power",
                 "ENERGY-Voltage": "voltage",
                 "ENERGY-Current": "current",
-                "ENERGY-Today": "energy",
+                "ENERGY-Total": "energy_total",
             }
             points_by_ts = {}
 
@@ -434,6 +435,7 @@ def register_routes(app, socketio):
                             "voltage": 0.0,
                             "current": 0.0,
                             "energy": 0.0,
+                            "energy_total": 0.0,
                         }
                         if include_ts_ms:
                             points_by_ts[ts]["tsMs"] = int(ts)
@@ -443,8 +445,92 @@ def register_routes(app, socketio):
                 history.append(points_by_ts[ts])
             return history
 
+        def _derive_energy_from_total(history_points, bucket_period: str) -> dict[str, float]:
+            """Derive per-bucket kWh from ENERGY-Total deltas with reset-safe handling.
+            
+            Handles:
+            - Counter reset (negative delta)
+            - Time gaps (>30min = new period, delta=0)  
+            - Duplicate register values (tiny delta over large gap = skip)
+            - Cross-day boundary (new day = reset)
+            - Repeated same delta value in same day (register stuck = skip repeats)
+            """
+            parsed = []
+            for point in history_points:
+                try:
+                    ts = datetime.fromisoformat(point["timestamp"])
+                    total = float(point.get("energy_total") or 0.0)
+                    parsed.append((ts, max(0.0, total)))
+                except (TypeError, ValueError):
+                    continue
+
+            if len(parsed) < 2:
+                logging.debug("_derive_energy_from_total: Not enough points (%d) for period %s", len(parsed), bucket_period)
+                return {}
+
+            parsed.sort(key=lambda x: x[0])
+            logging.debug("_derive_energy_from_total: Processing %d points for period %s", len(parsed), bucket_period)
+            logging.debug("First point: ts=%s, total=%.6f", parsed[0][0].isoformat(), parsed[0][1])
+            logging.debug("Last point: ts=%s, total=%.6f", parsed[-1][0].isoformat(), parsed[-1][1])
+            
+            by_bucket = defaultdict(float)
+            seen_deltas_by_day = defaultdict(dict)  # Track deltas per day to detect repetition
+            
+            prev_total = parsed[0][1]
+            prev_ts = parsed[0][0]
+
+            for idx, (ts, total) in enumerate(parsed[1:], 1):
+                # Calculate time gap in seconds
+                time_gap_sec = (ts - prev_ts).total_seconds()
+                time_gap_min = time_gap_sec / 60
+                day_key = ts.date().isoformat()
+                
+                delta = total - prev_total
+                
+                # Handle different scenarios
+                if delta < 0:
+                    # Counter reset/reboot
+                    logging.debug("Point %d: Counter reset detected (%.6f → %.6f), delta=%.6f → 0", idx, prev_total, total, delta)
+                    delta = 0.0
+                elif time_gap_min > 30:  # Gap > 30 minutes
+                    if delta < 0.05:  # Delta too small for such large gap = likely duplicate
+                        logging.debug("Point %d: Duplicate value detected (gap=%.0fmin, delta=%.6f), skipping", idx, time_gap_min, delta)
+                        delta = 0.0
+                    else:
+                        logging.debug("Point %d: Gap %.0f min detected with delta %.6f", idx, time_gap_min, delta)
+                elif ts.date() > prev_ts.date():  # Crossed day boundary
+                    logging.debug("Point %d: Day boundary crossed (%s → %s), delta stays %.6f", idx, prev_ts.date(), ts.date(), delta)
+                    seen_deltas_by_day[day_key] = {}  # Reset for new day
+                else:
+                    # Same day: check if this very small delta is repeated (register stuck at same value)
+                    delta_rounded = round(delta, 4)
+                    if 0 < delta_rounded <= 0.01 and delta_rounded in seen_deltas_by_day[day_key]:
+                        # Same tiny delta (<=0.01) appearing again in same day = likely register didn't budge
+                        logging.debug("Point %d: Repeated tiny delta (%.6f <= 0.01) in same day, skipping", idx, delta_rounded)
+                        delta = 0.0
+                    elif delta_rounded > 0:
+                        seen_deltas_by_day[day_key][delta_rounded] = True
+                
+                prev_total = total
+                prev_ts = ts
+
+                if delta <= 0:
+                    continue
+
+                if bucket_period == "day":
+                    bucket = ts.replace(minute=0, second=0, microsecond=0)
+                else:
+                    bucket = ts.replace(hour=0, minute=0, second=0, microsecond=0)
+                
+                logging.debug("Point %d: ts=%s, gap=%.0fm, delta=%.6f → bucket=%s", idx, ts.isoformat(), time_gap_min, delta, bucket.isoformat())
+                by_bucket[bucket.isoformat()] += delta
+
+            result = {k: round(v, 6) for k, v in by_bucket.items() if v > 0}
+            logging.debug("_derive_energy_from_total result for %s: %s", bucket_period, result)
+            return result
+
         def _fetch_timeseries(start_ts, end_ts, limit, agg, interval, timeout=20):
-            keys = "ENERGY-Power,ENERGY-Voltage,ENERGY-Current,ENERGY-Today"
+            keys = "ENERGY-Power,ENERGY-Voltage,ENERGY-Current,ENERGY-Today,ENERGY-Total"
             url = f"{shared.CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/values/timeseries"
             params = {
                 "keys": keys,
@@ -457,6 +543,112 @@ def register_routes(app, socketio):
             response = requests.get(url, headers=shared.HEADERS, params=params, timeout=timeout)
             response.raise_for_status()
             return response.json()
+
+        def _fetch_energy_deltas_by_bucket(start_ts: int, end_ts: int, bucket_period: str) -> dict[str, float]:
+            """Build energy (kWh) by hour/day from ENERGY-Total deltas with reset-safe logic.
+            
+            Handles:
+            - Counter reset (negative delta)
+            - Time gaps (no data for >30min → new period, delta=0)
+            - Duplicate register values (tiny delta over large gap → skip)
+            - Cross-day boundary (new day → reset accumulation)
+            - Repeated same value in same day (register stuck)
+            """
+            url = f"{shared.CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/values/timeseries"
+            params = {
+                "keys": "ENERGY-Total",
+                "startTs": start_ts,
+                "endTs": end_ts,
+                "limit": 50000,
+                "agg": "NONE",
+                "interval": 0,
+            }
+            response = requests.get(url, headers=shared.HEADERS, params=params, timeout=20)
+            response.raise_for_status()
+            raw = response.json()
+            entries = raw.get("ENERGY-Total", [])
+            logging.debug("_fetch_energy_deltas_by_bucket: Fetched %d raw entries for period %s", len(entries), bucket_period)
+            if len(entries) < 2:
+                logging.warning("Not enough entries (%d) for %s", len(entries), bucket_period)
+                return {}
+
+            parsed = []
+            for entry in entries:
+                try:
+                    ts_ms = int(entry.get("ts"))
+                    total_kwh = float(entry.get("value") or 0.0)
+                    parsed.append((ts_ms, max(0.0, total_kwh)))
+                except (TypeError, ValueError):
+                    continue
+
+            if len(parsed) < 2:
+                logging.warning("Not enough parsed entries (%d) for %s", len(parsed), bucket_period)
+                return {}
+
+            parsed.sort(key=lambda x: x[0])
+            logging.debug("First entry (period %s): ts=%d (%.0f), total=%.6f", bucket_period, parsed[0][0], parsed[0][0]/1000, parsed[0][1])
+            logging.debug("Last entry (period %s): ts=%d (%.0f), total=%.6f", bucket_period, parsed[-1][0], parsed[-1][0]/1000, parsed[-1][1])
+            
+            by_bucket = defaultdict(float)
+            seen_deltas_by_day = defaultdict(dict)  # Track deltas per day to detect repetition
+
+            prev_total = parsed[0][1]
+            prev_ts_ms = parsed[0][0]
+            
+            for idx, (ts_ms, total_kwh) in enumerate(parsed[1:], 1):
+                dt = datetime.fromtimestamp(ts_ms / 1000)
+                prev_dt = datetime.fromtimestamp(prev_ts_ms / 1000)
+                day_key = dt.date().isoformat()
+                
+                # Calculate time gap in seconds
+                time_gap_sec = (ts_ms - prev_ts_ms) / 1000
+                time_gap_min = time_gap_sec / 60
+                
+                delta = total_kwh - prev_total
+                
+                # Handle different scenarios
+                if delta < 0:
+                    # Counter reset/reboot
+                    logging.debug("Entry %d: Counter reset (%.6f → %.6f), setting delta=0", idx, prev_total, total_kwh)
+                    delta = 0.0
+                elif time_gap_min > 30:  # Gap > 30 minutes
+                    if delta < 0.05:  # Delta too small for such large gap = likely duplicate register value
+                        logging.debug("Entry %d: Duplicate value detected (gap=%.0fmin, delta=%.6f), skipping", idx, time_gap_min, delta)
+                        delta = 0.0  # Skip this entry
+                    else:
+                        # Real consumption, but likely device was off
+                        logging.debug("Entry %d: Gap %.0f min detected with delta %.6f, treating as new period", idx, time_gap_min, delta)
+                elif dt.date() > prev_dt.date():  # Crossed day boundary
+                    # Don't accumulate delta across days
+                    logging.debug("Entry %d: Day boundary crossed (%s → %s), delta stays %.6f", idx, prev_dt.date(), dt.date(), delta)
+                    seen_deltas_by_day[day_key] = {}  # Reset for new day
+                else:
+                    # Same day: check if this very small delta is repeated (register stuck at same value)
+                    delta_rounded = round(delta, 4)
+                    if 0 < delta_rounded <= 0.01 and delta_rounded in seen_deltas_by_day[day_key]:
+                        # Same tiny delta (<=0.01) appearing again in same day = likely register didn't budge
+                        logging.debug("Entry %d: Repeated tiny delta (%.6f <= 0.01) in same day, skipping", idx, delta_rounded)
+                        delta = 0.0
+                    elif delta_rounded > 0:
+                        seen_deltas_by_day[day_key][delta_rounded] = True
+                
+                prev_total = total_kwh
+                prev_ts_ms = ts_ms
+
+                if delta <= 0:
+                    continue
+
+                if bucket_period == "day":
+                    bucket = dt.replace(minute=0, second=0, microsecond=0)
+                else:
+                    bucket = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+                    
+                logging.debug("Entry %d: ts=%s, gap=%.0fm, delta=%.6f → bucket=%s", idx, dt.isoformat(), time_gap_min, delta, bucket.isoformat())
+                by_bucket[bucket.isoformat()] += delta
+
+            result = {k: round(v, 6) for k, v in by_bucket.items() if v > 0}
+            logging.debug("_fetch_energy_deltas_by_bucket result for %s: %s", bucket_period, result)
+            return result
 
         try:
             now = datetime.now()
@@ -644,6 +836,12 @@ def register_routes(app, socketio):
                     raise fallback_err
             
             history = _build_history(raw_data)
+            if period == "day":
+                energy_by_bucket = _derive_energy_from_total(history, period)
+            else:
+                # For week/month, always recompute from raw (non-aggregated) ENERGY-Total.
+                # Aggregated daily snapshots are insufficient for reliable delta reconstruction.
+                energy_by_bucket = _fetch_energy_deltas_by_bucket(start_ts, end_ts, period)
             
             # Log for debugging
             logging.info("Fetched %d history points for device %s, period %s", len(history), device_id, period)
@@ -673,6 +871,8 @@ def register_routes(app, socketio):
                     ts = datetime.fromisoformat(point["timestamp"])
                     hour_key = ts.replace(minute=0, second=0, microsecond=0).isoformat()
                     if hour_key in filled_history:
+                        # Ensure timestamp is hour-rounded, not raw
+                        point["timestamp"] = hour_key
                         filled_history[hour_key] = point
                 
                 # Convert back to list, sorted by time
@@ -681,6 +881,39 @@ def register_routes(app, socketio):
                     "Filled day view for hours 00-%d (current hour): %d points, now=%s",
                     current_hour, len(history), now.isoformat()
                 )
+
+            # Recompute energy from ENERGY-Total deltas to avoid reset-related drift and duplicated daily values.
+            if energy_by_bucket:
+                logging.debug("Energy by bucket for period %s: %s", period, energy_by_bucket)
+                for point in history:
+                    ts_point = datetime.fromisoformat(point["timestamp"])
+                    if period == "day":
+                        bucket_key = ts_point.replace(minute=0, second=0, microsecond=0).isoformat()
+                    else:
+                        bucket_key = ts_point.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+                    point["energy"] = float(energy_by_bucket.get(bucket_key, 0.0))
+                logging.debug("Updated history points with energy from buckets (period=%s)", period)
+            else:
+                # Fallback: derive interval energy from power to avoid stale ENERGY-Today values.
+                interval_hours = 1.0 if period == "day" else 24.0
+                logging.warning("No energy_by_bucket data, falling back to power-based calculation (period=%s)", period)
+                for point in history:
+                    power_w = float(point.get("power") or 0.0)
+                    point["energy"] = round(max(0.0, power_w) * interval_hours / 1000.0, 6)
+
+            # Strip internal field before returning payload.
+            for point in history:
+                point.pop("energy_total", None)
+            
+            # Log final history for debugging
+            total_energy = sum(float(p.get("energy", 0.0)) for p in history)
+            logging.info(
+                "Returning %s history for device %s: %d points, total energy=%.6f kWh",
+                period, device_id, len(history), total_energy
+            )
+            if period == "day":
+                for point in history[-5:]:  # Log last 5 points for day view
+                    logging.debug("Last points for day view - %s: energy=%.6f kWh", point.get("timestamp"), point.get("energy", 0.0))
             
             # Downsample if needed (keep only up to limit points)
             if len(history) > limit:
@@ -1205,6 +1438,11 @@ def register_routes(app, socketio):
             return jsonify({"status": "error", "message": str(e)}), 500
 
     if shared.FORECAST_ENABLED:
+        FORECAST_RESULT_PATH = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "forecast_result.json",
+        )
+
         def _push_ml_analysis_to_coreiot(device_id: str, forecast_payload: dict):
             """Push ML analysis telemetry and prediction attributes to CoreIoT for one device."""
             now_ms = int(time.time() * 1000)
@@ -1284,6 +1522,56 @@ def register_routes(app, socketio):
                 "attempts": errors,
                 "payload": telemetry_payload,
             }
+
+        def _month_consumption_from_energy_summary_source(timeout_sec: float = 20.0) -> float:
+            """Compute month kWh using the same source/logic as Energy page month summary card."""
+            now = datetime.now()
+            current_month = now.strftime("%Y-%m")
+
+            if hasattr(shared, "monthly_boundaries") and current_month in shared.monthly_boundaries:
+                snapshot = shared.monthly_boundaries[current_month]
+                if snapshot.get("closed"):
+                    return round(max(0.0, float(snapshot.get("consumed_kwh") or 0.0)), 6)
+
+                total_from_cache = sum(
+                    v for k, v in shared.hourly_kwh_global.items() if k.startswith(current_month)
+                )
+                return round(max(0.0, total_from_cache), 6)
+
+            # Fallback path is also identical to /energy/summary: month ENERGY-Power hourly aggregation.
+            start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            start_ts = int(start_of_month.timestamp() * 1000)
+            end_ts = int(now.timestamp() * 1000)
+            device_ids = shared.get_tracked_device_ids()
+            if not device_ids:
+                device_ids = shared.get_devices_from_group()
+
+            total_kwh = 0.0
+            for device_id in device_ids:
+                try:
+                    url = f"{shared.CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/values/timeseries"
+                    params = {
+                        "keys": "ENERGY-Power",
+                        "startTs": start_ts,
+                        "endTs": end_ts,
+                        "limit": 10000,
+                        "agg": "AVG",
+                        "interval": 3600000,
+                    }
+                    resp = requests.get(url, headers=shared.HEADERS, params=params, timeout=timeout_sec)
+                    resp.raise_for_status()
+                    raw = resp.json()
+
+                    for entry in raw.get("ENERGY-Power", []):
+                        try:
+                            power_w = float(entry.get("value") or 0.0)
+                            total_kwh += max(0.0, power_w) / 1000.0
+                        except (TypeError, ValueError):
+                            continue
+                except Exception as e:
+                    logging.warning("Month consumption source skipped device %s due to error: %s", device_id, e)
+
+            return round(max(0.0, total_kwh), 6)
 
         @app.route("/forecast", methods=["GET"])
         def trigger_forecast():
@@ -1371,15 +1659,15 @@ def register_routes(app, socketio):
                 # Use CoreIoT as the primary source so forecast math matches Energy page totals.
                 coreiot_history = _coreiot_hourly_kwh(start_of_month, now)
                 if coreiot_history:
-                    # Match the value users see on CoreIoT dashboard.
-                    consumed = _coreiot_latest_total_kwh()
+                    # Keep this identical to /energy/summary month consumption source.
+                    consumed = _month_consumption_from_energy_summary_source(forecast_coreiot_timeout)
                     if consumed <= 0:
                         consumed = sum(coreiot_history.values())
                     recent_history = dict(sorted(coreiot_history.items(), key=lambda x: x[0], reverse=True)[:1200])
                 else:
-                    consumed = sum(
-                        v for k, v in shared.hourly_kwh_global.items() if datetime.fromisoformat(k) >= start_of_month
-                    )
+                    consumed = _month_consumption_from_energy_summary_source(forecast_coreiot_timeout)
+                    if consumed <= 0:
+                        consumed = _coreiot_latest_total_kwh()
                     recent_history = dict(
                         sorted(shared.hourly_kwh_global.items(), key=lambda x: x[0], reverse=True)[:1200]
                     )
@@ -1396,10 +1684,10 @@ def register_routes(app, socketio):
                 logging.info("FORECAST SUCCESS -> Bill: %s VND", f"{result['PredictedBillVND']:,}")
 
                 try:
-                    with open("forecast_result.json", "w", encoding="utf-8") as f:
+                    with open(FORECAST_RESULT_PATH, "w", encoding="utf-8") as f:
                         json.dump(result, f, indent=4, ensure_ascii=False)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logging.error("Failed to write forecast result file %s: %s", FORECAST_RESULT_PATH, e)
 
                 return jsonify(result)
 
@@ -1425,7 +1713,7 @@ def register_routes(app, socketio):
             forecast_payload = data.get("forecast")
             if not forecast_payload:
                 try:
-                    with open("forecast_result.json", "r", encoding="utf-8") as f:
+                    with open(FORECAST_RESULT_PATH, "r", encoding="utf-8") as f:
                         forecast_payload = json.load(f)
                 except FileNotFoundError:
                     return (
@@ -1486,16 +1774,17 @@ def register_routes(app, socketio):
 
                 prev_total = parsed[0][1]
                 for ts_ms, total_kwh in parsed[1:]:
+                    dt = datetime.fromtimestamp(ts_ms / 1000)
                     delta = total_kwh - prev_total
-                    # Device reset can make cumulative value drop.
+                    # Counter reset can make cumulative value drop.
                     if delta < 0:
-                        delta = total_kwh
+                        delta = 0.0
                     prev_total = total_kwh
 
                     if delta <= 0:
                         continue
 
-                    hour_key = datetime.fromtimestamp(ts_ms / 1000).replace(
+                    hour_key = dt.replace(
                         minute=0, second=0, microsecond=0
                     ).strftime("%Y-%m-%dT%H:00:00")
                     hourly[hour_key] += delta
@@ -1554,21 +1843,28 @@ def register_routes(app, socketio):
                         }
                         continue
 
+                    history_consumed_this_month = round(sum(history_dict.values()), 6)
                     realtime_total = _coreiot_latest_energy_total(device_id)
+                    consumed_this_month = history_consumed_this_month
+
                     if realtime_total is None:
-                        # Fallback only when CoreIoT latest value is unavailable.
-                        consumed_this_month = round(sum(history_dict.values()), 6)
                         logging.warning(
-                            "Realtime ENERGY-Total unavailable for %s (%s), fallback consumed=%.3f kWh from history",
+                            "Realtime ENERGY-Total unavailable for %s (%s), using history consumed=%.3f kWh",
                             plug_name,
                             device_id,
                             consumed_this_month,
                         )
                     else:
-                        consumed_this_month = round(realtime_total, 6)
+                        logging.info(
+                            "Realtime ENERGY-Total for %s (%s)=%.3f kWh, history consumed=%.3f kWh (using history to avoid reset drift)",
+                            plug_name,
+                            device_id,
+                            realtime_total,
+                            history_consumed_this_month,
+                        )
 
                     logging.info(
-                        "Forecasting plug %s (device=%s): Consumed=%.3f kWh from real-time ENERGY-Total",
+                        "Forecasting plug %s (device=%s): Consumed=%.3f kWh from ENERGY-Total delta history",
                         plug_name,
                         device_id,
                         consumed_this_month,
@@ -1647,8 +1943,8 @@ def register_routes(app, socketio):
         @app.route("/forecast/summary", methods=["GET"])
         def get_forecast_summary():
             try:
-                if os.path.exists("forecast_result.json"):
-                    with open("forecast_result.json", "r", encoding="utf-8") as f:
+                if os.path.exists(FORECAST_RESULT_PATH):
+                    with open(FORECAST_RESULT_PATH, "r", encoding="utf-8") as f:
                         full_result = json.load(f)
 
                     summary_data = {
@@ -1874,30 +2170,16 @@ def register_routes(app, socketio):
                         logging.warning("Energy summary (day) skipped device %s due to error: %s", device_id, e)
 
             else:
-                # For 'month': Use ENERGY-Total (cumulative total for the month)
-                for device_id in device_ids:
-                    try:
-                        url = (
-                            f"{shared.CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/"
-                            f"values/timeseries?keys=ENERGY-Total&limit=1"
-                        )
-                        resp = requests.get(url, headers=shared.HEADERS, timeout=20)
-                        resp.raise_for_status()
-                        raw = resp.json()
-                        entries = raw.get("ENERGY-Total", [])
-                        if entries:
-                            total_kwh += float(entries[0].get("value") or 0.0)
-                    except Exception as e:
-                        logging.warning("Energy summary (month) skipped device %s due to error: %s", device_id, e)
+                # For 'month': single source of truth shared with forecast input.
+                total_kwh = _month_consumption_from_energy_summary_source(20.0)
 
             total_kwh = round(max(0.0, total_kwh), 4)
             total_cost = round(calculate_vietnam_electricity_bill(total_kwh), 2)
-            return jsonify(
-                {
-                    "status": "success",
-                    "data": {
-                        "totalConsumption": total_kwh,
-                        "totalCost": total_cost,
-                    },
-                }
-            )
+            return jsonify({
+                "status": "success",
+                "data": {
+                    "totalConsumption": total_kwh,
+                    "totalCost": total_cost,
+                },
+                "source": "monthly_snapshot" if 'snapshot' in locals() else "power_history"
+            })
