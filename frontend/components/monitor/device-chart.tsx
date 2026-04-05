@@ -31,15 +31,74 @@ export function DeviceChart({ data, dataKey, color, unit, isLoading, period = "d
     )
   }
 
+  const sortedData = [...data].sort(
+    (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+  )
+
+  // For energy chart:
+  // - If series already has resets (drops), keep raw values.
+  // - If series looks like per-bucket deltas, convert to cumulative per day
+  //   so day boundaries still show a drop then rise.
+  const maybeCumulativeEnergyData = (() => {
+    if (dataKey !== "energy") return sortedData
+
+    const values = sortedData.map((item) => Number(item.energy || 0))
+    let decreases = 0
+    for (let i = 1; i < values.length; i++) {
+      if (values[i] + 1e-9 < values[i - 1]) {
+        decreases += 1
+      }
+    }
+
+    const hasResetPattern = decreases > 0
+
+    if (hasResetPattern) {
+      return sortedData
+    }
+
+    let running = 0
+    let currentDay = ""
+    return sortedData.map((item) => {
+      const ts = new Date(item.timestamp)
+      const dayKey = `${ts.getFullYear()}-${(ts.getMonth() + 1).toString().padStart(2, "0")}-${ts
+        .getDate()
+        .toString()
+        .padStart(2, "0")}`
+
+      if (dayKey !== currentDay) {
+        currentDay = dayKey
+        running = 0
+      }
+
+      running += Math.max(0, Number(item.energy || 0))
+      return {
+        ...item,
+        energy: running,
+      }
+    })
+  })()
+
+  const formatValue = (value: number) => {
+    if (dataKey === "energy") {
+      if (value >= 1) return value.toFixed(3)
+      return value.toFixed(6).replace(/0+$/, "").replace(/\.$/, "")
+    }
+    if (dataKey === "current") return value.toFixed(3)
+    if (dataKey === "voltage") return value.toFixed(1)
+    if (dataKey === "power") return value.toFixed(1)
+    return value.toFixed(2)
+  }
+
   // Format data for chart based on period
-  const chartData = data.map((item) => {
+  const chartData = maybeCumulativeEnergyData.map((item) => {
     const date = new Date(item.timestamp)
     let time = ""
     
     if (period === "day") {
-      // For day: show only hour (00, 01, 02, ..., 23)
+      // For day: keep hour and minute to match real telemetry intervals.
       const hour = date.getHours().toString().padStart(2, "0")
-      time = `${hour}h`
+      const minute = date.getMinutes().toString().padStart(2, "0")
+      time = `${hour}:${minute}`
     } else if (period === "week") {
       // For week: show day abbreviation (e.g., Mon, Tue)
       time = date.toLocaleDateString("vi-VN", {
@@ -94,7 +153,7 @@ export function DeviceChart({ data, dataKey, color, unit, isLoading, period = "d
                       <p className="text-sm text-muted-foreground">
                         Giá trị:{" "}
                         <span className="font-semibold" style={{ color }}>
-                          {Number(payload[0].value).toFixed(2)} {unit}
+                          {formatValue(Number(payload[0].value || 0))} {unit}
                         </span>
                       </p>
                     </div>

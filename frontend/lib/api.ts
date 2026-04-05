@@ -261,10 +261,15 @@ export async function controlAllDevices(command: "ON" | "OFF"): Promise<Device[]
 
 
 export async function fetchEnergyData(
-  period: "day" | "week" | "month"
+  period: "day" | "week" | "month",
+  deviceId?: string
 ): Promise<EnergyData[]> {
   try {
-    const response = await fetch(`${API_BASE_URL}/energy?period=${period}`);
+    const query = new URLSearchParams({ period });
+    if (deviceId) {
+      query.set("deviceId", deviceId);
+    }
+    const response = await fetch(`${API_BASE_URL}/energy?${query.toString()}`);
     if (!response.ok) throw new Error("Failed to fetch energy data");
     
     const data: EnergyData[] = await response.json();
@@ -280,10 +285,15 @@ export async function fetchEnergyData(
 }
 
 export async function fetchEnergySummary(
-  period: "day" | "week" | "month" = "month"
+  period: "day" | "week" | "month" = "month",
+  deviceId?: string
 ): Promise<EnergySummaryData | null> {
   try {
-    const response = await fetch(`${API_BASE_URL}/energy/summary?period=${period}`);
+    const query = new URLSearchParams({ period });
+    if (deviceId) {
+      query.set("deviceId", deviceId);
+    }
+    const response = await fetch(`${API_BASE_URL}/energy/summary?${query.toString()}`);
     if (!response.ok) throw new Error("Failed to fetch energy summary");
 
     const result = await response.json();
