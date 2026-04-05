@@ -529,6 +529,48 @@ def register_routes(app, socketio):
             logging.debug("_derive_energy_from_total result for %s: %s", bucket_period, result)
             return result
 
+        def _derive_energy_profile_from_total(history_points) -> dict[str, float]:
+            """Build per-point daily cumulative energy profile from ENERGY-Total.
+
+            For each day:
+            - baseline starts at first ENERGY-Total point of that day
+            - energy = max(total - baseline, 0)
+            - if counter resets (total < previous total), reset baseline at that point
+            """
+            parsed = []
+            for point in history_points:
+                try:
+                    ts = datetime.fromisoformat(point["timestamp"])
+                    total = float(point.get("energy_total") or 0.0)
+                    parsed.append((ts, max(0.0, total)))
+                except (TypeError, ValueError):
+                    continue
+
+            if not parsed:
+                return {}
+
+            parsed.sort(key=lambda x: x[0])
+            profile_by_ts = {}
+            current_day = None
+            baseline_total = 0.0
+            prev_total = None
+
+            for ts, total in parsed:
+                day_key = ts.date().isoformat()
+                if day_key != current_day:
+                    current_day = day_key
+                    baseline_total = total
+                    prev_total = total
+
+                if prev_total is not None and total < prev_total:
+                    baseline_total = total
+
+                energy_value = max(0.0, total - baseline_total)
+                profile_by_ts[ts.isoformat()] = round(energy_value, 6)
+                prev_total = total
+
+            return profile_by_ts
+
         def _fetch_timeseries(start_ts, end_ts, limit, agg, interval, timeout=20):
             keys = "ENERGY-Power,ENERGY-Voltage,ENERGY-Current,ENERGY-Today,ENERGY-Total"
             url = f"{shared.CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/values/timeseries"
@@ -789,14 +831,14 @@ def register_routes(app, socketio):
 
             if period == "week":
                 start_time = now - timedelta(days=7)
-                limit = 336  # 7 days × 24 hours (hourly)
-                agg = "AVG"
-                interval = 3600000  # 1 hour
+                limit = 5000  # keep enough points for intra-day shape
+                agg = "NONE"
+                interval = 0
             elif period == "month":
                 start_time = now - timedelta(days=30)
-                limit = 30  # 30 days (daily, not hourly to avoid too many points)
-                agg = "AVG"
-                interval = 86400000  # 1 day
+                limit = 10000  # keep enough points for intra-day shape
+                agg = "NONE"
+                interval = 0
             else:  # period == "day"
                 # For day view: fetch from 00:00 today to now (not "24h ago")
                 start_time = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -839,9 +881,7 @@ def register_routes(app, socketio):
             if period == "day":
                 energy_by_bucket = _derive_energy_from_total(history, period)
             else:
-                # For week/month, always recompute from raw (non-aggregated) ENERGY-Total.
-                # Aggregated daily snapshots are insufficient for reliable delta reconstruction.
-                energy_by_bucket = _fetch_energy_deltas_by_bucket(start_ts, end_ts, period)
+                energy_profile_by_ts = _derive_energy_profile_from_total(history)
             
             # Log for debugging
             logging.info("Fetched %d history points for device %s, period %s", len(history), device_id, period)
@@ -883,7 +923,12 @@ def register_routes(app, socketio):
                 )
 
             # Recompute energy from ENERGY-Total deltas to avoid reset-related drift and duplicated daily values.
-            if energy_by_bucket:
+            if period in ("week", "month") and energy_profile_by_ts:
+                logging.debug("Energy profile by timestamp for period %s has %d points", period, len(energy_profile_by_ts))
+                for point in history:
+                    point["energy"] = float(energy_profile_by_ts.get(point["timestamp"], 0.0))
+                logging.debug("Updated history points with daily cumulative energy profile (period=%s)", period)
+            elif energy_by_bucket:
                 logging.debug("Energy by bucket for period %s: %s", period, energy_by_bucket)
                 for point in history:
                     ts_point = datetime.fromisoformat(point["timestamp"])
@@ -1973,6 +2018,7 @@ def register_routes(app, socketio):
         @app.route("/energy", methods=["GET"])
         def get_energy_data():
             period = request.args.get("period", "day")
+            requested_device_id = (request.args.get("deviceId") or "").strip()
             now = datetime.now()
 
             start_of_this_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -1992,9 +2038,12 @@ def register_routes(app, socketio):
             end_ts = int(now.timestamp() * 1000)
 
             # Prefer tracked CB devices; fallback to all devices in group.
-            device_ids = shared.get_tracked_device_ids()
-            if not device_ids:
-                device_ids = shared.get_devices_from_group()
+            if requested_device_id:
+                device_ids = [requested_device_id]
+            else:
+                device_ids = shared.get_tracked_device_ids()
+                if not device_ids:
+                    device_ids = shared.get_devices_from_group()
 
             # Determine aggregation interval based on period
             # Day: hourly, Week/Month: daily
@@ -2126,13 +2175,17 @@ def register_routes(app, socketio):
             For 'month': Use cumulative total (ENERGY-Total)
             """
             period = request.args.get("period", "month")
+            requested_device_id = (request.args.get("deviceId") or "").strip()
 
             if period not in ["day", "month"]:
                 return jsonify({"status": "success", "data": {"totalConsumption": 0.0, "totalCost": 0.0}})
 
-            device_ids = shared.get_tracked_device_ids()
-            if not device_ids:
-                device_ids = shared.get_devices_from_group()
+            if requested_device_id:
+                device_ids = [requested_device_id]
+            else:
+                device_ids = shared.get_tracked_device_ids()
+                if not device_ids:
+                    device_ids = shared.get_devices_from_group()
 
             total_kwh = 0.0
 
