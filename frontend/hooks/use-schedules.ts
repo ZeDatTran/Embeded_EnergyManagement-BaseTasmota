@@ -31,13 +31,21 @@ export interface AutoScenarioResponse {
     deviceId: string
     deviceName: string
     days: string[]
-    onSchedule: Omit<Schedule, "id" | "createdAt">
-    offSchedule: Omit<Schedule, "id" | "createdAt">
+    peaks: Array<{
+      onSchedule: Omit<Schedule, "id" | "createdAt">
+      offSchedule: Omit<Schedule, "id" | "createdAt">
+      analysis: {
+        peakWindow: [number, number]
+        bufferHours: number
+        extendedWindow: [number, number]
+        totalKwhInWindow: number
+      }
+    }>
     analysis: {
       samples: number
       activeHours: number[]
-      peakWindow: [number, number]
-      totalKwhInWindow: number
+      dataSource: string
+      lookbackDays: number
     }
   }>
   createdSchedules: Schedule[]

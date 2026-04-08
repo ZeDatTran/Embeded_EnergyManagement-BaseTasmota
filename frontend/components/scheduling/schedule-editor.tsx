@@ -220,11 +220,10 @@ export function ScheduleEditor() {
                     key={day}
                     type="button"
                     onClick={() => toggleDay(day)}
-                    className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
-                      selected
+                    className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${selected
                         ? "bg-primary text-primary-foreground"
                         : "border border-border bg-background text-muted-foreground hover:bg-accent"
-                    }`}
+                      }`}
                   >
                     {day}
                   </button>

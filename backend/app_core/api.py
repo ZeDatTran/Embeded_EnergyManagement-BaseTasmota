@@ -1217,58 +1217,56 @@ def register_routes(app, socketio):
             end_ts = int(now.replace(minute=0, second=0, microsecond=0).timestamp() * 1000)
 
             def _fetch_coreiot_hourly_points(device_id: str) -> list[dict]:
-                """Read hourly history + latest power point directly from CoreIoT."""
+                """Fetch hourly energy using ENERGY-Total delta (accurate).
+
+                ENERGY-Total is a cumulative lifetime counter. Delta between
+                consecutive readings = actual kWh consumed, unaffected by
+                count-based sampling bias of ENERGY-Power AVG.
+                """
                 url = f"{shared.CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/values/timeseries"
                 params = {
-                    "keys": "ENERGY-Power",
+                    "keys": "ENERGY-Total",
                     "startTs": start_ts,
                     "endTs": end_ts,
-                    "limit": min(10000, lookback_days * 24 + 48),
-                    "agg": "AVG",
-                    "interval": 3600000,
+                    "limit": 50000,
+                    "orderBy": "ASC",
                 }
+                resp = requests.get(url, headers=shared.HEADERS, params=params, timeout=25)
+                resp.raise_for_status()
+                raw = resp.json()
 
-                history_points: dict[str, dict] = {}
-                history_resp = requests.get(url, headers=shared.HEADERS, params=params, timeout=25)
-                history_resp.raise_for_status()
-                history_payload = history_resp.json()
+                entries = raw.get("ENERGY-Total", [])
+                if not entries:
+                    return []
 
-                for entry in history_payload.get("ENERGY-Power", []):
-                    ts = entry.get("ts")
-                    if ts is None:
-                        continue
+                # Parse and ensure ascending order
+                parsed = []
+                for e in entries:
                     try:
-                        power_w = float(entry.get("value") or 0.0)
-                    except (TypeError, ValueError):
+                        ts_ms = int(e["ts"])
+                        val = float(e.get("value") or 0.0)
+                        parsed.append((ts_ms, max(0.0, val)))
+                    except (TypeError, ValueError, KeyError):
                         continue
+                parsed.sort(key=lambda x: x[0])
 
-                    hour_dt = datetime.fromtimestamp(ts / 1000).replace(minute=0, second=0, microsecond=0)
-                    hour_key = hour_dt.strftime("%Y-%m-%dT%H:00:00")
-                    history_points[hour_key] = {
-                        "hour": hour_dt,
-                        "energy_kwh": max(0.0, power_w) / 1000.0,
-                    }
+                if len(parsed) < 2:
+                    return []
 
-                latest_params = {"keys": "ENERGY-Power", "limit": 1, "orderBy": "DESC"}
-                latest_resp = requests.get(url, headers=shared.HEADERS, params=latest_params, timeout=15)
-                latest_resp.raise_for_status()
-                latest_payload = latest_resp.json()
-                latest_entries = latest_payload.get("ENERGY-Power", [])
-                if latest_entries:
-                    latest_entry = latest_entries[0]
-                    try:
-                        latest_ts = int(latest_entry.get("ts"))
-                        latest_power_w = float(latest_entry.get("value") or 0.0)
-                        latest_dt = datetime.fromtimestamp(latest_ts / 1000).replace(minute=0, second=0, microsecond=0)
-                        latest_key = latest_dt.strftime("%Y-%m-%dT%H:00:00")
-                        history_points[latest_key] = {
-                            "hour": latest_dt,
-                            "energy_kwh": max(0.0, latest_power_w) / 1000.0,
-                        }
-                    except (TypeError, ValueError):
-                        pass
+                # Accumulate delta kWh into hour buckets
+                hourly_kwh: dict = {}
+                prev_ts_ms, prev_total = parsed[0]
+                for ts_ms, total_kwh in parsed[1:]:
+                    delta = total_kwh - prev_total
+                    if delta > 0:
+                        dt = datetime.fromtimestamp(ts_ms / 1000).replace(
+                            minute=0, second=0, microsecond=0
+                        )
+                        hourly_kwh[dt] = hourly_kwh.get(dt, 0.0) + delta
+                    # Always update baseline (handles counter resets correctly)
+                    prev_ts_ms, prev_total = ts_ms, total_kwh
 
-                return list(history_points.values())
+                return [{"hour": dt, "energy_kwh": kwh} for dt, kwh in hourly_kwh.items()]
 
             tracked_device_ids = shared.get_tracked_device_ids() or shared.get_devices_from_group()
             if isinstance(target_device_ids, list) and target_device_ids:
@@ -1315,14 +1313,16 @@ def register_routes(app, socketio):
                 if not hourly_energy:
                     continue
 
-                # Select active hours by usage intensity and derive the main continuous window.
+                # ── Usage pattern analysis ────────────────────────────────────
+                # Active hours: above 40% of the highest-energy hour
                 max_hour_energy = max(hourly_energy.values())
                 threshold = max_hour_energy * 0.4
                 active_hours = sorted([h for h, e in hourly_energy.items() if e >= threshold])
                 if not active_hours:
                     continue
 
-                segments = []
+                # Group into contiguous segments
+                segments: list[list[int]] = []
                 current_segment = [active_hours[0]]
                 for h in active_hours[1:]:
                     if h == current_segment[-1] + 1:
@@ -1332,19 +1332,33 @@ def register_routes(app, socketio):
                         current_segment = [h]
                 segments.append(current_segment)
 
-                best_segment = max(
+                # Rank segments by total energy consumed
+                segments_ranked = sorted(
                     segments,
-                    key=lambda seg: sum(hourly_energy.get(hour, 0.0) for hour in seg),
+                    key=lambda seg: sum(hourly_energy.get(hh, 0.0) for hh in seg),
+                    reverse=True,
                 )
-                on_hour = (best_segment[0] - buffer_hours) % 24
-                off_hour = (best_segment[-1] + 1 + buffer_hours) % 24
+                best_energy = sum(hourly_energy.get(hh, 0.0) for hh in segments_ranked[0])
 
-                on_time = f"{on_hour:02d}:00"
-                off_time = f"{off_hour:02d}:00"
+                # Accept a 2nd peak only if it has >= 30% of the primary peak's energy
+                top_segments = [segments_ranked[0]]
+                if len(segments_ranked) > 1:
+                    second_energy = sum(hourly_energy.get(hh, 0.0) for hh in segments_ranked[1])
+                    if second_energy >= best_energy * 0.30:
+                        top_segments.append(segments_ranked[1])
 
-                weekday_counts = list(weekday_hits.values())
-                median_hits = statistics.median(weekday_counts) if weekday_counts else 0
-                days = [d for d in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] if weekday_hits[d] >= median_hits and weekday_hits[d] > 0]
+                # Display in chronological order
+                top_segments.sort(key=lambda seg: seg[0])
+
+                # ── Day selection: ratio-based (active >= 30% of possible occurrences) ──
+                max_occ_per_day = max(1, (lookback_days + 6) // 7)
+                days = [
+                    d for d in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+                    if weekday_hits[d] / max_occ_per_day >= 0.30
+                ]
+                if not days:
+                    # Fallback: any day with at least 1 data point
+                    days = [d for d in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] if weekday_hits[d] > 0]
                 if not days:
                     days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
@@ -1356,40 +1370,50 @@ def register_routes(app, socketio):
                 )
                 device_name = metadata.get("name") or f"Device {device_id[-6:]}"
 
-                on_name = f"Auto ON {device_name}"
-                off_name = f"Auto OFF {device_name}"
+                # ── Build peaks list (one entry per usage window) ──────────────
+                peaks_list = []
+                for i, seg in enumerate(top_segments):
+                    on_hour = (seg[0] - buffer_hours) % 24
+                    off_hour = (seg[-1] + 1 + buffer_hours) % 24
+                    on_time = f"{on_hour:02d}:00"
+                    off_time = f"{off_hour:02d}:00"
+                    suffix = f" P{i + 1}" if len(top_segments) > 1 else ""
+                    seg_kwh = round(sum(hourly_energy.get(hh, 0.0) for hh in seg), 4)
+                    peaks_list.append({
+                        "onSchedule": {
+                            "name": f"Auto ON {device_name}{suffix}",
+                            "targetId": device_id,
+                            "action": "on",
+                            "time": on_time,
+                            "days": days,
+                            "enabled": True,
+                        },
+                        "offSchedule": {
+                            "name": f"Auto OFF {device_name}{suffix}",
+                            "targetId": device_id,
+                            "action": "off",
+                            "time": off_time,
+                            "days": days,
+                            "enabled": True,
+                        },
+                        "analysis": {
+                            "peakWindow": [seg[0], seg[-1]],
+                            "bufferHours": buffer_hours,
+                            "extendedWindow": [on_hour, (off_hour - 1) % 24],
+                            "totalKwhInWindow": seg_kwh,
+                        },
+                    })
 
                 suggestion = {
                     "deviceId": device_id,
                     "deviceName": device_name,
                     "days": days,
-                    "onSchedule": {
-                        "name": on_name,
-                        "targetId": device_id,
-                        "action": "on",
-                        "time": on_time,
-                        "days": days,
-                        "enabled": True,
-                    },
-                    "offSchedule": {
-                        "name": off_name,
-                        "targetId": device_id,
-                        "action": "off",
-                        "time": off_time,
-                        "days": days,
-                        "enabled": True,
-                    },
+                    "peaks": peaks_list,
                     "analysis": {
                         "samples": len(device_points),
                         "activeHours": active_hours,
-                        "peakWindow": [best_segment[0], best_segment[-1]],
-                        "bufferHours": buffer_hours,
-                        "extendedWindow": [on_hour, (off_hour - 1) % 24],
-                        "dataSource": "coreiot_direct",
-                        "totalKwhInWindow": round(
-                            sum(hourly_energy.get(hour, 0.0) for hour in best_segment),
-                            4,
-                        ),
+                        "dataSource": "energy_total_delta",
+                        "lookbackDays": lookback_days,
                     },
                 }
                 suggestions.append(suggestion)
@@ -1406,37 +1430,38 @@ def register_routes(app, socketio):
                         for sch in existing_schedules
                     }
 
-                    for schedule_payload in (suggestion["onSchedule"], suggestion["offSchedule"]):
-                        dedupe_key = (
-                            schedule_payload["targetId"],
-                            schedule_payload["action"],
-                            schedule_payload["time"],
-                            ",".join(sorted(schedule_payload["days"])),
-                            True,
-                        )
-                        if dedupe_key in existing_keys:
-                            continue
+                    for peak in peaks_list:
+                        for schedule_payload in (peak["onSchedule"], peak["offSchedule"]):
+                            dedupe_key = (
+                                schedule_payload["targetId"],
+                                schedule_payload["action"],
+                                schedule_payload["time"],
+                                ",".join(sorted(schedule_payload["days"])),
+                                True,
+                            )
+                            if dedupe_key in existing_keys:
+                                continue
 
-                        created = shared.create_schedule(
-                            name=schedule_payload["name"],
-                            target_id=schedule_payload["targetId"],
-                            action=schedule_payload["action"],
-                            time=schedule_payload["time"],
-                            days=schedule_payload["days"],
-                            enabled=True,
-                            run_once=False,
-                            source="data_driven",
-                            source_run_id=None,
-                            approval_status="approved",
-                            execution_priority=80,
-                            metadata={
-                                "generator": "auto_scenarios",
-                                "lookbackDays": lookback_days,
-                                "deviceId": device_id,
-                            },
-                        )
-                        created_schedules.append(created)
-                        existing_keys.add(dedupe_key)
+                            created = shared.create_schedule(
+                                name=schedule_payload["name"],
+                                target_id=schedule_payload["targetId"],
+                                action=schedule_payload["action"],
+                                time=schedule_payload["time"],
+                                days=schedule_payload["days"],
+                                enabled=True,
+                                run_once=False,
+                                source="data_driven",
+                                source_run_id=None,
+                                approval_status="approved",
+                                execution_priority=80,
+                                metadata={
+                                    "generator": "auto_scenarios",
+                                    "lookbackDays": lookback_days,
+                                    "deviceId": device_id,
+                                },
+                            )
+                            created_schedules.append(created)
+                            existing_keys.add(dedupe_key)
 
             if auto_apply and created_schedules:
                 for schedule in created_schedules:
