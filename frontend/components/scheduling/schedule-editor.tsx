@@ -98,38 +98,50 @@ export function ScheduleEditor() {
   if (!isScheduleEditorOpen) return null
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-lg border border-border bg-card text-card-foreground shadow-xl">
-        <div className="flex items-center justify-between border-b border-border p-6">
-          <h2 className="text-lg font-semibold">{editingScheduleId ? "Edit Schedule" : "Create Schedule"}</h2>
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 sm:items-center sm:p-4">
+      {/* Modal: full-screen bottom sheet on mobile, centered dialog on sm+ */}
+      <div className="max-h-[92dvh] w-full overflow-y-auto rounded-t-2xl border border-border bg-card text-card-foreground shadow-xl sm:max-h-[90vh] sm:max-w-md sm:rounded-lg">
+        {/* Header */}
+        <div className="sticky top-0 z-10 flex items-center justify-between border-b border-border bg-card px-4 py-4 sm:px-6">
+          {/* Drag handle (mobile only) */}
+          <div className="absolute left-1/2 top-2 h-1 w-10 -translate-x-1/2 rounded-full bg-muted-foreground/30 sm:hidden" />
+          <h2 className="text-base font-semibold sm:text-lg">
+            {editingScheduleId ? "Chỉnh sửa lịch" : "Tạo lịch mới"}
+          </h2>
           <button
             onClick={() => setScheduleEditorOpen(false)}
-            className="rounded p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+            className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
           >
             <X size={20} />
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} className="p-6 space-y-4">
+        <form onSubmit={handleSubmit} className="space-y-4 px-4 py-5 sm:px-6">
+          {/* Schedule name */}
           <div>
-            <label className="mb-1 block text-sm font-medium text-foreground">Schedule Name *</label>
+            <label className="mb-1.5 block text-sm font-medium text-foreground">
+              Tên lịch <span className="text-red-500">*</span>
+            </label>
             <input
               type="text"
               value={formData.name}
               onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-              className="w-full rounded-lg border border-input bg-background px-3 py-2 text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-              placeholder="e.g., Evening Lights"
+              className="w-full rounded-lg border border-input bg-background px-3 py-2.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+              placeholder="VD: Bật đèn buổi tối"
             />
           </div>
 
+          {/* Target device */}
           <div>
-            <label className="mb-1 block text-sm font-medium text-foreground">Target Device/Group *</label>
+            <label className="mb-1.5 block text-sm font-medium text-foreground">
+              Thiết bị / Nhóm <span className="text-red-500">*</span>
+            </label>
             <select
               value={formData.targetId}
               onChange={(e) => setFormData({ ...formData, targetId: e.target.value })}
-              className="w-full rounded-lg border border-input bg-background px-3 py-2 text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+              className="w-full rounded-lg border border-input bg-background px-3 py-2.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
             >
-              <option value="">Select a device or group</option>
+              <option value="">Chọn thiết bị hoặc nhóm</option>
               {tree?.map((area: any) => (
                 <optgroup key={area.id} label={area.name}>
                   {area.children?.map((group: any) => (
@@ -142,88 +154,111 @@ export function ScheduleEditor() {
             </select>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          {/* Action + Time (side by side on all screens) */}
+          <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="mb-1 block text-sm font-medium text-foreground">Action *</label>
+              <label className="mb-1.5 block text-sm font-medium text-foreground">
+                Hành động <span className="text-red-500">*</span>
+              </label>
               <select
                 value={formData.action}
                 onChange={(e) => setFormData({ ...formData, action: e.target.value as "on" | "off" })}
-                className="w-full rounded-lg border border-input bg-background px-3 py-2 text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                className="w-full rounded-lg border border-input bg-background px-3 py-2.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
               >
-                <option value="on">Turn ON</option>
-                <option value="off">Turn OFF</option>
+                <option value="on">Bật</option>
+                <option value="off">Tắt</option>
               </select>
             </div>
 
             <div>
-              <label className="mb-1 block text-sm font-medium text-foreground">Time *</label>
+              <label className="mb-1.5 block text-sm font-medium text-foreground">
+                Giờ <span className="text-red-500">*</span>
+              </label>
               <input
                 type="time"
                 value={formData.time}
                 onChange={(e) => setFormData({ ...formData, time: e.target.value })}
-                className="w-full rounded-lg border border-input bg-background px-3 py-2 text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                className="w-full rounded-lg border border-input bg-background px-3 py-2.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
               />
             </div>
           </div>
 
-          <div className="flex items-center gap-2 rounded-md border border-border bg-muted/30 px-3 py-2">
+          {/* Run-once toggle */}
+          <label className="flex cursor-pointer items-center gap-3 rounded-lg border border-border bg-muted/30 px-3 py-3 select-none">
             <input
               type="checkbox"
               id="run-once"
               checked={formData.runOnce}
-              onChange={(e) => setFormData({ ...formData, runOnce: e.target.checked, days: e.target.checked ? formData.days.slice(0, 1) : formData.days })}
-              className="h-4 w-4 rounded border-border"
+              onChange={(e) =>
+                setFormData({
+                  ...formData,
+                  runOnce: e.target.checked,
+                  days: e.target.checked ? formData.days.slice(0, 1) : formData.days,
+                })
+              }
+              className="h-4 w-4 shrink-0 rounded border-border accent-primary"
             />
-            <label htmlFor="run-once" className="text-sm text-foreground">
-              Run once and auto delete after execution
-            </label>
-          </div>
+            <span className="text-sm text-foreground leading-tight">
+              Chạy một lần rồi tự xóa sau khi thực thi
+            </span>
+          </label>
 
+          {/* Days of week */}
           <div>
             <label className="mb-2 block text-sm font-medium text-foreground">
-              Days * {formData.runOnce ? "(select exactly 1)" : ""}
+              Ngày trong tuần <span className="text-red-500">*</span>
+              {formData.runOnce && (
+                <span className="ml-1 text-xs font-normal text-muted-foreground">(chọn đúng 1 ngày)</span>
+              )}
             </label>
-            <div className="grid grid-cols-4 gap-2">
-              {DAYS.map((day) => (
-                <label key={day} className="flex cursor-pointer items-center gap-2 rounded border border-transparent px-1 py-1 hover:border-border">
-                  <input
-                    type="checkbox"
-                    checked={formData.days.includes(day)}
-                    onChange={() => toggleDay(day)}
-                    className="h-4 w-4 rounded border-border"
-                  />
-                  <span className="text-sm text-foreground">{day}</span>
-                </label>
-              ))}
+            {/* 7 buttons in a single row — wrap naturally on tiny screens */}
+            <div className="flex flex-wrap gap-1.5">
+              {DAYS.map((day) => {
+                const selected = formData.days.includes(day)
+                return (
+                  <button
+                    key={day}
+                    type="button"
+                    onClick={() => toggleDay(day)}
+                    className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
+                      selected
+                        ? "bg-primary text-primary-foreground"
+                        : "border border-border bg-background text-muted-foreground hover:bg-accent"
+                    }`}
+                  >
+                    {day}
+                  </button>
+                )
+              })}
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          {/* Enabled */}
+          <label className="flex cursor-pointer items-center gap-3 select-none">
             <input
               type="checkbox"
               id="enabled"
               checked={formData.enabled}
               onChange={(e) => setFormData({ ...formData, enabled: e.target.checked })}
-              className="h-4 w-4 rounded border-border"
+              className="h-4 w-4 rounded border-border accent-primary"
             />
-            <label htmlFor="enabled" className="text-sm text-muted-foreground">
-              Enable this schedule
-            </label>
-          </div>
+            <span className="text-sm text-muted-foreground">Kích hoạt lịch này ngay</span>
+          </label>
 
-          <div className="flex gap-3 pt-4">
+          {/* Buttons */}
+          <div className="flex gap-3 pt-2 pb-1">
             <button
               type="button"
               onClick={() => setScheduleEditorOpen(false)}
-              className="flex-1 rounded-lg border border-border px-4 py-2 font-medium text-foreground transition-colors hover:bg-accent"
+              className="flex-1 rounded-xl border border-border px-4 py-2.5 text-sm font-medium text-foreground transition-colors hover:bg-accent"
             >
-              Cancel
+              Hủy
             </button>
             <button
               type="submit"
-              className="flex-1 rounded-lg bg-primary px-4 py-2 font-medium text-primary-foreground transition-opacity hover:opacity-90"
+              className="flex-1 rounded-xl bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90"
             >
-              {editingScheduleId ? "Update" : "Create"}
+              {editingScheduleId ? "Cập nhật" : "Tạo lịch"}
             </button>
           </div>
         </form>

@@ -152,19 +152,22 @@ def process_new_energy(device_id, total_energy_str, ts_iso):
             
             # Decision logic for delta calculation
             if delta < 0:
-                # Device counter reset detected
+                # Device counter reset detected - always update previous_energy to new value
+                # so that subsequent readings calculate delta from the reset point correctly.
                 logging.info(
-                    "Device %s counter reset detected (%.6f → %.6f). Setting delta=0.",
+                    "Device %s counter reset detected (%.6f → %.6f). Skipping delta, updating baseline.",
                     device_id, prev_val, total_energy
                 )
-                delta = 0.0
+                previous_energy[device_id] = (ts, total_energy)
+                return
             elif is_new_day:
-                # Cross day boundary: treat as new period, don't carry delta from yesterday
-                logging.info(
-                    "Device %s new day boundary (%s → %s). Resetting delta to 0.",
-                    device_id, prev_ts.date(), ts.date()
+                # ENERGY-Total is a lifetime accumulator; it does NOT reset at midnight.
+                # (Only ENERGY-Today resets daily.) A cross-day delta is valid energy consumed
+                # between the last evening reading and the first morning reading - record it.
+                logging.debug(
+                    "Device %s cross-day reading (%s -> %s). Delta=%.6f kWh is valid.",
+                    device_id, prev_ts.date(), ts.date(), delta
                 )
-                delta = 0.0
             elif is_long_gap and 0 < delta < 0.05:
                 # Long gap (>30min) but tiny delta (<0.05 kWh): likely register didn't change, duplicate value
                 logging.warning(
@@ -377,13 +380,15 @@ def get_device_telemetry(device_id):
             power_w = float(parsed_telemetry.get("ENERGY-Power") or 0)
             current_a = float(parsed_telemetry.get("ENERGY-Current") or 0)
             voltage_v = float(parsed_telemetry.get("ENERGY-Voltage") or 0)
-            # Polling interval is ~10 seconds in periodic_data_logger.
-            # Energy per sample (kWh) = W * seconds / (1000 * 3600).
-            estimated_kwh = max(0.0, power_w) * 10.0 / (1000.0 * 3600.0)
+            # Only update power/current/voltage metadata in plug_hourly_energy.
+            # Do NOT add estimated_kwh here to avoid double-counting with the
+            # ENERGY-Total delta already written by process_new_energy() via WebSocket.
+            # energy_kwh=0 ensures ON CONFLICT only updates metadata columns, not the
+            # energy accumulator, because 0 is effectively a no-op addition.
             save_plug_hourly_energy(
                 device_id=device_id,
                 hour_bucket=hour_bucket,
-                energy_kwh=estimated_kwh,
+                energy_kwh=0.0,
                 power_avg_w=power_w,
                 current_avg_a=current_a,
                 voltage_avg_v=voltage_v,

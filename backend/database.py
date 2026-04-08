@@ -305,34 +305,68 @@ def save_plug_hourly_energy(
     created_at = datetime.now().isoformat()
     with lock:
         with _connect() as conn:
-            conn.execute(
-                """INSERT INTO plug_hourly_energy (
-                    id, device_id, hour_bucket, power_avg_w, current_avg_a, voltage_avg_v,
-                    energy_kwh, on_minutes, samples_count, source, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(device_id, hour_bucket) DO UPDATE SET
-                    energy_kwh = plug_hourly_energy.energy_kwh + excluded.energy_kwh,
-                    power_avg_w = COALESCE(excluded.power_avg_w, plug_hourly_energy.power_avg_w),
-                    current_avg_a = COALESCE(excluded.current_avg_a, plug_hourly_energy.current_avg_a),
-                    voltage_avg_v = COALESCE(excluded.voltage_avg_v, plug_hourly_energy.voltage_avg_v),
-                    on_minutes = MIN(60, plug_hourly_energy.on_minutes + excluded.on_minutes),
-                    samples_count = plug_hourly_energy.samples_count + excluded.samples_count,
-                    source = excluded.source
-                """,
-                (
-                    record_id,
-                    device_id,
-                    hour_bucket,
-                    power_avg_w,
-                    current_avg_a,
-                    voltage_avg_v,
-                    round(max(0.0, energy_kwh), 6),
-                    max(0, min(60, on_minutes)),
-                    max(1, samples_count),
-                    source,
-                    created_at,
-                ),
-            )
+            if source == "derived":
+                # "derived" rows come from polling ENERGY-Power every ~10s.
+                # Do NOT accumulate energy_kwh on conflict: the accurate ENERGY-Total
+                # delta (source="coreiot") is the single source of truth for energy_kwh.
+                # On a fresh INSERT (no row yet) the value acts as a fallback only.
+                # On conflict, only refresh the power/current/voltage metadata.
+                conn.execute(
+                    """INSERT INTO plug_hourly_energy (
+                        id, device_id, hour_bucket, power_avg_w, current_avg_a, voltage_avg_v,
+                        energy_kwh, on_minutes, samples_count, source, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(device_id, hour_bucket) DO UPDATE SET
+                        power_avg_w = COALESCE(excluded.power_avg_w, plug_hourly_energy.power_avg_w),
+                        current_avg_a = COALESCE(excluded.current_avg_a, plug_hourly_energy.current_avg_a),
+                        voltage_avg_v = COALESCE(excluded.voltage_avg_v, plug_hourly_energy.voltage_avg_v),
+                        samples_count = plug_hourly_energy.samples_count + 1
+                    """,
+                    (
+                        record_id,
+                        device_id,
+                        hour_bucket,
+                        power_avg_w,
+                        current_avg_a,
+                        voltage_avg_v,
+                        round(max(0.0, energy_kwh), 6),
+                        max(0, min(60, on_minutes)),
+                        max(1, samples_count),
+                        source,
+                        created_at,
+                    ),
+                )
+            else:
+                # "coreiot" rows come from accurate ENERGY-Total delta calculations.
+                # Accumulate energy_kwh and override source to mark row as accurate.
+                conn.execute(
+                    """INSERT INTO plug_hourly_energy (
+                        id, device_id, hour_bucket, power_avg_w, current_avg_a, voltage_avg_v,
+                        energy_kwh, on_minutes, samples_count, source, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(device_id, hour_bucket) DO UPDATE SET
+                        energy_kwh = plug_hourly_energy.energy_kwh + excluded.energy_kwh,
+                        power_avg_w = COALESCE(excluded.power_avg_w, plug_hourly_energy.power_avg_w),
+                        current_avg_a = COALESCE(excluded.current_avg_a, plug_hourly_energy.current_avg_a),
+                        voltage_avg_v = COALESCE(excluded.voltage_avg_v, plug_hourly_energy.voltage_avg_v),
+                        on_minutes = MIN(60, plug_hourly_energy.on_minutes + excluded.on_minutes),
+                        samples_count = plug_hourly_energy.samples_count + excluded.samples_count,
+                        source = excluded.source
+                    """,
+                    (
+                        record_id,
+                        device_id,
+                        hour_bucket,
+                        power_avg_w,
+                        current_avg_a,
+                        voltage_avg_v,
+                        round(max(0.0, energy_kwh), 6),
+                        max(0, min(60, on_minutes)),
+                        max(1, samples_count),
+                        source,
+                        created_at,
+                    ),
+                )
             conn.commit()
 
 

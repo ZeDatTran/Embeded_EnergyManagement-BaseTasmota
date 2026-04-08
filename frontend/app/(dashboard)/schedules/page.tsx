@@ -39,19 +39,32 @@ export default function SchedulesPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h1 className="text-3xl font-bold">Schedules</h1>
-        <div className="flex items-center gap-2">
-          <Button onClick={handleAutoGenerate} variant="secondary" className="gap-2" disabled={isPending}>
-            <Sparkles size={18} />
-            {isPending ? "Generating..." : "Auto Generate"}
+      {/* Header: stack vertically on very small screens */}
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">Lịch tự động</h1>
+          <p className="text-sm text-muted-foreground mt-0.5">Quản lý lịch bật/tắt thiết bị</p>
+        </div>
+        <div className="flex gap-2">
+          <Button
+            onClick={handleAutoGenerate}
+            variant="secondary"
+            className="flex-1 gap-2 sm:flex-none"
+            disabled={isPending}
+          >
+            <Sparkles size={16} />
+            <span className="sm:inline">{isPending ? "Đang tạo..." : "Tạo tự động"}</span>
           </Button>
-          <Button onClick={() => setScheduleEditorOpen(true)} className="gap-2">
-            <Plus size={18} />
-            New Schedule
+          <Button
+            onClick={() => setScheduleEditorOpen(true)}
+            className="flex-1 gap-2 sm:flex-none"
+          >
+            <Plus size={16} />
+            <span className="sm:inline">Tạo lịch</span>
           </Button>
         </div>
       </div>
+
       <ScheduleList />
       <ScheduleEditor />
     </div>

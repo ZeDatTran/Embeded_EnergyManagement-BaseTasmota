@@ -14,7 +14,7 @@ from app_core.analysis_routes import register_analysis_routes
 
 
 def calculate_vietnam_electricity_bill(total_kwh):
-    """Vietnam household electricity tiered pricing + 8% VAT"""
+    
     tiers = [
         (100, 1984),   # Bậc 1: 0-50kWh → 1,984đ
         (100, 2050),   # Bậc 2: 50-100 → 2,050đ  
@@ -446,15 +446,7 @@ def register_routes(app, socketio):
             return history
 
         def _derive_energy_from_total(history_points, bucket_period: str) -> dict[str, float]:
-            """Derive per-bucket kWh from ENERGY-Total deltas with reset-safe handling.
-            
-            Handles:
-            - Counter reset (negative delta)
-            - Time gaps (>30min = new period, delta=0)  
-            - Duplicate register values (tiny delta over large gap = skip)
-            - Cross-day boundary (new day = reset)
-            - Repeated same delta value in same day (register stuck = skip repeats)
-            """
+           
             parsed = []
             for point in history_points:
                 try:
@@ -530,13 +522,7 @@ def register_routes(app, socketio):
             return result
 
         def _derive_energy_profile_from_total(history_points) -> dict[str, float]:
-            """Build per-point daily cumulative energy profile from ENERGY-Total.
-
-            For each day:
-            - baseline starts at first ENERGY-Total point of that day
-            - energy = max(total - baseline, 0)
-            - if counter resets (total < previous total), reset baseline at that point
-            """
+           
             parsed = []
             for point in history_points:
                 try:
@@ -587,15 +573,7 @@ def register_routes(app, socketio):
             return response.json()
 
         def _fetch_energy_deltas_by_bucket(start_ts: int, end_ts: int, bucket_period: str) -> dict[str, float]:
-            """Build energy (kWh) by hour/day from ENERGY-Total deltas with reset-safe logic.
             
-            Handles:
-            - Counter reset (negative delta)
-            - Time gaps (no data for >30min → new period, delta=0)
-            - Duplicate register values (tiny delta over large gap → skip)
-            - Cross-day boundary (new day → reset accumulation)
-            - Repeated same value in same day (register stuck)
-            """
             url = f"{shared.CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/values/timeseries"
             params = {
                 "keys": "ENERGY-Total",
@@ -2054,42 +2032,68 @@ def register_routes(app, socketio):
                 interval_ms = 86400000  # 1 day
                 is_hourly = False
 
-            # Aggregate power data across devices from CoreIoT, then convert to kWh.
+            # Use ENERGY-Total delta approach for accurate consumption measurement.
+            # ENERGY-Power with agg=AVG is count-based (not time-weighted), so when a device
+            # sends many samples while ON and few samples while OFF, the average is inflated,
+            # causing kWh to be 2-3x higher than reality.
+            # ENERGY-Total is a cumulative counter: delta between readings = actual kWh consumed.
             totals_by_interval_ts: dict[int, float] = {}
             for device_id in device_ids:
                 try:
                     url = f"{shared.CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/values/timeseries"
                     params = {
-                        "keys": "ENERGY-Power",
+                        "keys": "ENERGY-Total",
                         "startTs": start_ts,
                         "endTs": end_ts,
-                        "limit": 10000,
-                        "agg": "AVG",
-                        "interval": interval_ms,
+                        "limit": 50000,  # raw data - no aggregation
+                        "orderBy": "ASC",
                     }
                     resp = requests.get(url, headers=shared.HEADERS, params=params, timeout=20)
                     resp.raise_for_status()
                     raw = resp.json()
 
-                    for entry in raw.get("ENERGY-Power", []):
-                        ts = entry.get("ts")
-                        if ts is None:
-                            continue
+                    entries = raw.get("ENERGY-Total", [])
+                    if not entries:
+                        continue
+
+                    # Parse all entries, sort ascending by timestamp
+                    parsed = []
+                    for entry in entries:
                         try:
-                            power_w = float(entry.get("value") or 0.0)
+                            ts_ms = int(entry.get("ts"))
+                            val = float(entry.get("value") or 0.0)
+                            parsed.append((ts_ms, max(0.0, val)))
                         except (TypeError, ValueError):
                             continue
-                        # For hourly: group by hour; for daily: group by day
+
+                    if len(parsed) < 2:
+                        continue
+
+                    parsed.sort(key=lambda x: x[0])
+
+                    prev_ts_ms, prev_total = parsed[0]
+                    for ts_ms, total_kwh in parsed[1:]:
+                        delta = total_kwh - prev_total
+
+                        if delta < 0:
+                            # Counter reset: update baseline but don't count this delta
+                            prev_ts_ms, prev_total = ts_ms, total_kwh
+                            continue
+
+                        if delta == 0:
+                            prev_ts_ms, prev_total = ts_ms, total_kwh
+                            continue
+
+                        # Attribute delta to the interval bucket of the CURRENT reading
+                        dt = datetime.fromtimestamp(ts_ms / 1000)
                         if is_hourly:
-                            dt_interval = datetime.fromtimestamp(ts / 1000).replace(minute=0, second=0, microsecond=0)
+                            dt_interval = dt.replace(minute=0, second=0, microsecond=0)
                         else:
-                            dt_interval = datetime.fromtimestamp(ts / 1000).replace(hour=0, minute=0, second=0, microsecond=0)
+                            dt_interval = dt.replace(hour=0, minute=0, second=0, microsecond=0)
                         interval_ts = int(dt_interval.timestamp() * 1000)
-                        # Average power over interval (in watts); for daily interval, CoreIoT returns daily average
-                        # Convert: power_w × interval_hours / 1000 = kWh
-                        interval_hours = (interval_ms / 3600000)
-                        kwh_interval = (power_w * interval_hours) / 1000.0
-                        totals_by_interval_ts[interval_ts] = totals_by_interval_ts.get(interval_ts, 0.0) + max(0.0, kwh_interval)
+                        totals_by_interval_ts[interval_ts] = totals_by_interval_ts.get(interval_ts, 0.0) + delta
+
+                        prev_ts_ms, prev_total = ts_ms, total_kwh
                 except Exception as e:
                     logging.warning("Energy aggregation skipped device %s due to error: %s", device_id, e)
 
@@ -2190,7 +2194,7 @@ def register_routes(app, socketio):
             total_kwh = 0.0
 
             if period == "day":
-                # For 'day': Calculate from hourly power data (ENERGY-Power) to be consistent with chart
+                # For 'day': Use ENERGY-Total delta (same approach as chart) to be consistent.
                 now = datetime.now()
                 start_of_today = now.replace(hour=0, minute=0, second=0, microsecond=0)
                 start_ts = int(start_of_today.timestamp() * 1000)
@@ -2200,25 +2204,40 @@ def register_routes(app, socketio):
                     try:
                         url = f"{shared.CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/values/timeseries"
                         params = {
-                            "keys": "ENERGY-Power",
+                            "keys": "ENERGY-Total",
                             "startTs": start_ts,
                             "endTs": end_ts,
-                            "limit": 10000,
-                            "agg": "AVG",
-                            "interval": 3600000,  # hourly
+                            "limit": 50000,
+                            "orderBy": "ASC",
                         }
                         resp = requests.get(url, headers=shared.HEADERS, params=params, timeout=20)
                         resp.raise_for_status()
                         raw = resp.json()
 
-                        for entry in raw.get("ENERGY-Power", []):
+                        entries = raw.get("ENERGY-Total", [])
+                        if not entries:
+                            continue
+
+                        parsed = []
+                        for entry in entries:
                             try:
-                                power_w = float(entry.get("value") or 0.0)
-                                # Convert: power [W] × 1 hour / 1000 = kWh
-                                kwh_hour = max(0.0, power_w) / 1000.0
-                                total_kwh += kwh_hour
+                                ts_ms = int(entry.get("ts"))
+                                val = float(entry.get("value") or 0.0)
+                                parsed.append((ts_ms, max(0.0, val)))
                             except (TypeError, ValueError):
                                 continue
+
+                        if len(parsed) < 2:
+                            continue
+
+                        parsed.sort(key=lambda x: x[0])
+                        prev_total = parsed[0][1]
+                        for _, cur_total in parsed[1:]:
+                            delta = cur_total - prev_total
+                            if delta > 0:
+                                total_kwh += delta
+                            # Always update baseline (handles resets)
+                            prev_total = cur_total
                     except Exception as e:
                         logging.warning("Energy summary (day) skipped device %s due to error: %s", device_id, e)
 
