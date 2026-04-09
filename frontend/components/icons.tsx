@@ -36,6 +36,9 @@ import {
   UtensilsCrossed,
   Bath,
   Building2,
+  ShieldOff,
+  CalendarClock,
+  Banknote,
 } from "lucide-react"
 
 export const Icons = {
@@ -90,4 +93,9 @@ export const Icons = {
   chart: BarChart3,
   trendingUp: TrendingUp,
   trendingDown: TrendingDown,
+
+  // Dashboard
+  shieldOff: ShieldOff,
+  calendarClock: CalendarClock,
+  banknote: Banknote,
 }

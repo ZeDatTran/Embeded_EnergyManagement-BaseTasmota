@@ -4,15 +4,16 @@ import { useEffect, useRef, useState } from "react";
 import { StatCard } from "@/components/dashboard/stat-card";
 import { DeviceStatusCard } from "@/components/dashboard/device-status-card";
 import { AddCBDialog } from "@/components/dashboard/add-cb-dialog";
+import { EmergencyStopButton } from "@/components/dashboard/emergency-stop-button";
+import { UpcomingSchedules } from "@/components/dashboard/upcoming-schedules";
+import { EnergyTodayCard } from "@/components/dashboard/energy-today-card";
 import { Icons } from "@/components/icons";
-import { fetchDevices, controlAllDevices, type Device } from "@/lib/api";
-import { Button } from "@/components/ui/button";
+import { fetchDevices, type Device } from "@/lib/api";
 import { useSocket } from "@/context/SocketContext";
 
 export default function DashboardPage() {
   const [devices, setDevices] = useState<Device[]>([]);
   const [loading, setLoading] = useState(true);
-  const [controlling, setControlling] = useState(false);
   const { socket, isConnected } = useSocket();
 
   const isFetching = useRef(false);
@@ -144,37 +145,10 @@ export default function DashboardPage() {
     };
   }, [socket, isConnected]);
 
-  const handleTurnOnAll = async () => {
-    setControlling(true);
-    const results = await controlAllDevices("ON");
-    if (results.length > 0) {
-      setDevices((prevDevices) =>
-        prevDevices.map((device) => {
-          const result = results.find((r) => r.id === device.id);
-          return result ? { ...device, isOn: true } : device;
-        }),
-      );
-    }
-    setControlling(false);
-  };
-
-  const handleTurnOffAll = async () => {
-    setControlling(true);
-    const results = await controlAllDevices("OFF");
-    if (results.length > 0) {
-      setDevices((prevDevices) =>
-        prevDevices.map((device) => {
-          const result = results.find((r) => r.id === device.id);
-          return result ? { ...device, isOn: false } : device;
-        }),
-      );
-    }
-    setControlling(false);
-  };
-
   const onlineDevices = devices.filter((d) => d.status === "online").length;
   const activeDevices = devices.filter((d) => d.isOn).length;
   const totalPower = devices.reduce((sum, d) => sum + (d.power || 0), 0);
+  const totalEnergyToday = devices.reduce((sum, d) => sum + (d.energyToday || 0), 0);
 
   if (loading) {
     return (
@@ -187,61 +161,76 @@ export default function DashboardPage() {
     );
   }
 
+  // Get current greeting based on time
+  const getGreeting = () => {
+    const hour = new Date().getHours();
+    if (hour < 12) return "Chào buổi sáng ☀️";
+    if (hour < 18) return "Chào buổi chiều 🌤️";
+    return "Chào buổi tối 🌙";
+  };
+
   return (
     <div className="space-y-6">
       {/* Page header */}
-      <div>
-        <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">Dashboard</h1>
-        <p className="text-sm sm:text-base text-muted-foreground">Quản lý CB tổng theo phòng</p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">
+            {getGreeting()}
+          </h1>
+          <p className="text-sm sm:text-base text-muted-foreground mt-1">
+            Quản lý và giám sát hệ thống CB tổng theo phòng
+          </p>
+        </div>
+
+        {/* Emergency Stop Button */}
+        <div className="flex items-center gap-3">
+          <div className="hidden sm:flex flex-col items-end mr-2">
+            <span className="text-xs font-medium text-red-500/80">Tắt khẩn cấp</span>
+            <span className="text-[10px] text-muted-foreground">Ngắt tất cả CB</span>
+          </div>
+          <EmergencyStopButton onSuccess={() => loadDevices(false)} />
+        </div>
       </div>
 
-      {/* Stats grid */}
+      {/* Stats grid with gradient backgrounds */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard
           title="Tổng CB"
           value={devices.length}
           icon={<Icons.cb className="h-6 w-6 text-blue-500" />}
+          gradientClass="stat-gradient-blue"
         />
         <StatCard
           title="Đang hoạt động"
           value={activeDevices}
-          icon={<Icons.power className="h-6 w-6 text-green-500" />}
+          icon={<Icons.power className="h-6 w-6 text-emerald-500" />}
+          gradientClass="stat-gradient-green"
         />
         <StatCard
           title="Đang online"
           value={onlineDevices}
-          icon={<Icons.online className="h-6 w-6 text-blue-500" />}
+          icon={<Icons.online className="h-6 w-6 text-cyan-500" />}
+          gradientClass="stat-gradient-cyan"
         />
         <StatCard
           title="Tổng công suất"
-          value={`${totalPower}W`}
-          icon={<Icons.energy className="h-6 w-6 text-yellow-500" />}
+          value={`${totalPower.toFixed(1)}W`}
+          icon={<Icons.energy className="h-6 w-6 text-amber-500" />}
+          gradientClass="stat-gradient-amber"
         />
       </div>
 
-      <div className="flex flex-col sm:flex-row gap-3">
-        <Button
-          onClick={handleTurnOnAll}
-          disabled={controlling}
-          className="flex-1 bg-green-600 hover:bg-green-700 text-white"
-          size="lg"
-        >
-          <Icons.power className="mr-2 h-5 w-5" />
-          {controlling ? "Đang xử lý..." : "Bật tất cả"}
-        </Button>
-        <Button
-          onClick={handleTurnOffAll}
-          disabled={controlling}
-          className="flex-1 bg-red-600 hover:bg-red-700 text-white"
-          variant="default"
-          size="lg"
-        >
-          <Icons.power className="mr-2 h-5 w-5" />
-          {controlling ? "Đang xử lý..." : "Tắt tất cả"}
-        </Button>
+      {/* Upcoming Schedules + Energy Today */}
+      <div className="grid gap-4 lg:grid-cols-3">
+        <div className="lg:col-span-2">
+          <UpcomingSchedules />
+        </div>
+        <div>
+          <EnergyTodayCard />
+        </div>
       </div>
 
-      {/* CB overview - now full width */}
+      {/* CB overview - full width */}
       <div className="space-y-4">
         <div className="flex items-center justify-between">
           <h2 className="text-xl font-semibold">CB Tổng theo phòng</h2>
@@ -255,7 +244,7 @@ export default function DashboardPage() {
         <div className="grid gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
           {devices.length === 0 && (
             <div className="col-span-full text-center py-8 text-muted-foreground">
-              Chưa có CB nào. Nhấn "Thêm CB mới" để bắt đầu.
+              Chưa có CB nào. Nhấn &quot;Thêm CB mới&quot; để bắt đầu.
             </div>
           )}
           {devices.map((device) => (
