@@ -272,7 +272,7 @@ def train_improved_models():
     
     # Load data
     df = load_data_for_training()
-    print(f"\n📈 Data shape: {df.shape}")
+    print(f"\nData shape: {df.shape}")
     total_hours = len(df)
     
     # Create advanced features
@@ -319,22 +319,24 @@ def train_improved_models():
     print("\n  [1/3] Training XGBoost (Tuned)...")
     xgb_params_primary = {
         "n_estimators": 400,
-        "learning_rate": 0.015,
-        "max_depth": 7,
-        "min_child_weight": 1,
+        "learning_rate": 0.03,
+        "max_depth": 6,
+        "min_child_weight": 2,
         "subsample": 0.8,
         "colsample_bytree": 0.8,
-        "gamma": 1,
-        "reg_alpha": 0.5,
+        "colsample_bylevel": 0.8,
+        "gamma": 0.001,
+        "reg_alpha": 0.01,
         "reg_lambda": 1,
         "objective": "reg:squarederror",
         "eval_metric": "rmse",
         "random_state": 42,
         "n_jobs": -1,
         "verbosity": 0,
+        "early_stopping_rounds": 50,
     }
     model_xgb = xgb.XGBRegressor(**xgb_params_primary)
-    model_xgb.fit(X_train, y_train)
+    model_xgb.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
 
     y_pred_xgb_train = model_xgb.predict(X_train)
     y_pred_xgb_test = model_xgb.predict(X_test)
@@ -360,9 +362,10 @@ def train_improved_models():
             "random_state": 42,
             "n_jobs": -1,
             "verbosity": 0,
+            "early_stopping_rounds": 30,
         }
         model_xgb = xgb.XGBRegressor(**xgb_params_fallback)
-        model_xgb.fit(X_train, y_train)
+        model_xgb.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
         y_pred_xgb_train = model_xgb.predict(X_train)
         y_pred_xgb_test = model_xgb.predict(X_test)
         xgb_train_r2 = r2_score(y_train, y_pred_xgb_train)
@@ -405,14 +408,15 @@ def train_improved_models():
     if HAS_CATBOOST:
         try:
             model_cat = CatBoostRegressor(
-                iterations=300,
+                iterations=800,
                 depth=6,
                 learning_rate=0.03,
                 loss_function="RMSE",
                 random_seed=42,
                 verbose=False,
+                early_stopping_rounds=50,
             )
-            model_cat.fit(X_train, y_train)
+            model_cat.fit(X_train, y_train, eval_set=(X_test, y_test), verbose=False)
             joblib.dump(model_cat, cat_path)
             y_pred_cat_train = model_cat.predict(X_train)
             y_pred_cat_test = model_cat.predict(X_test)

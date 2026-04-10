@@ -1201,7 +1201,7 @@ def register_routes(app, socketio):
             max_devices = int(payload.get("maxDevices", 8) or 8)
             min_samples = int(payload.get("minSamples", 12) or 12)
             auto_apply = bool(payload.get("autoApply", True))
-            buffer_hours = int(payload.get("bufferHours", 2) or 2)
+            buffer_hours = int(payload.get("bufferHours", 0) or 0)
             target_device_ids = payload.get("deviceIds")
 
             if lookback_days < 1 or lookback_days > 90:
@@ -1217,12 +1217,7 @@ def register_routes(app, socketio):
             end_ts = int(now.replace(minute=0, second=0, microsecond=0).timestamp() * 1000)
 
             def _fetch_coreiot_hourly_points(device_id: str) -> list[dict]:
-                """Fetch hourly energy using ENERGY-Total delta (accurate).
 
-                ENERGY-Total is a cumulative lifetime counter. Delta between
-                consecutive readings = actual kWh consumed, unaffected by
-                count-based sampling bias of ENERGY-Power AVG.
-                """
                 url = f"{shared.CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/values/timeseries"
                 params = {
                     "keys": "ENERGY-Total",
@@ -1313,7 +1308,7 @@ def register_routes(app, socketio):
                 if not hourly_energy:
                     continue
 
-                # ── Usage pattern analysis ────────────────────────────────────
+                # Usage pattern analysis 
                 # Active hours: above 40% of the highest-energy hour
                 max_hour_energy = max(hourly_energy.values())
                 threshold = max_hour_energy * 0.4
@@ -1350,7 +1345,7 @@ def register_routes(app, socketio):
                 # Display in chronological order
                 top_segments.sort(key=lambda seg: seg[0])
 
-                # ── Day selection: ratio-based (active >= 30% of possible occurrences) ──
+                # Day selection: ratio-based (active >= 30% of possible occurrences) 
                 max_occ_per_day = max(1, (lookback_days + 6) // 7)
                 days = [
                     d for d in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
