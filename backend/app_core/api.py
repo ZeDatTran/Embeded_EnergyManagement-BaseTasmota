@@ -1365,7 +1365,7 @@ def register_routes(app, socketio):
                 )
                 device_name = metadata.get("name") or f"Device {device_id[-6:]}"
 
-                # ── Build peaks list (one entry per usage window) ──────────────
+                #  Build peaks list (one entry per usage window) 
                 peaks_list = []
                 for i, seg in enumerate(top_segments):
                     on_hour = (seg[0] - buffer_hours) % 24
