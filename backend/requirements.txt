@@ -16,3 +16,6 @@ scikit-learn==1.5.1
 xgboost==2.1.1
 catboost==1.2.7
 joblib==1.4.2
+
+# AI Chatbot - Gemini (new SDK, replaces deprecated google-generativeai)
+google-genai>=1.0.0
