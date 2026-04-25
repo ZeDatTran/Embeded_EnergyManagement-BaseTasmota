@@ -286,10 +286,10 @@ def train_improved_models():
             "Increase COREIOT_LOOKBACK_DAYS or ensure denser telemetry."
         )
     
-    # Define features (exclude target + helper columns that are not available at inference time)
+    # Exclude target and absolute time features
     FEATURES = [
         col for col in df_features.columns
-        if col not in {'kwh_hour', 'kwh_detrended'}
+        if col not in {'kwh_hour', 'kwh_detrended', 'time_idx', 'linear_trend', 'trend_slope'}
     ]
     TARGET = 'kwh_hour'
     

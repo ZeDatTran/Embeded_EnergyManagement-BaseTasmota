@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from "react"
 
-// ──────────────────────── Types ─────────────────────────────────────────────
+//  Types 
 interface Message {
   id: string
   role: "user" | "assistant"
@@ -11,7 +11,7 @@ interface Message {
   isError?: boolean
 }
 
-// ──────────────────────── Constants ─────────────────────────────────────────
+// Constants 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:5000"
 const SESSION_KEY = "chatbot_session_id"
 
@@ -25,7 +25,7 @@ function getOrCreateSessionId(): string {
   return id
 }
 
-// ──────────────────────── Markdown-lite renderer ────────────────────────────
+// Markdown-lite renderer 
 function renderMarkdown(text: string): string {
   return text
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
@@ -34,7 +34,7 @@ function renderMarkdown(text: string): string {
     .replace(/\n/g, "<br/>")
 }
 
-// ──────────────────────── Bubble component ──────────────────────────────────
+// Bubble component
 function ChatBubble({ msg }: { msg: Message }) {
   const isUser = msg.role === "user"
   const time = msg.timestamp.toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" })
@@ -58,7 +58,7 @@ function ChatBubble({ msg }: { msg: Message }) {
   )
 }
 
-// ──────────────────────── Typing indicator ──────────────────────────────────
+// Typing indicator 
 function TypingIndicator() {
   return (
     <div className="chat-bubble-row row-assistant">
@@ -72,7 +72,7 @@ function TypingIndicator() {
   )
 }
 
-// ──────────────────────── Suggestions ────────────────────────────────────────
+// Suggestions 
 const SUGGESTIONS = [
   "Liệt kê tất cả thiết bị",
   "Tổng tiêu thụ hôm nay là bao nhiêu?",
@@ -80,7 +80,7 @@ const SUGGESTIONS = [
   "Bật tất cả thiết bị",
 ]
 
-// ──────────────────────── Main widget ────────────────────────────────────────
+// Main widget 
 export function ChatWidget() {
   const [open, setOpen] = useState(false)
   const [messages, setMessages] = useState<Message[]>([
@@ -147,7 +147,7 @@ export function ChatWidget() {
           {
             id: `err-${Date.now()}`,
             role: "assistant",
-            content: "❌ Lỗi kết nối backend. Vui lòng kiểm tra server đang chạy.",
+            content: " Lỗi kết nối backend. Vui lòng kiểm tra server đang chạy.",
             timestamp: new Date(),
             isError: true,
           },
@@ -176,7 +176,7 @@ export function ChatWidget() {
         timestamp: new Date(),
       },
     ])
-    fetch(`${BACKEND_URL}/api/chat/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {})
+    fetch(`${BACKEND_URL}/api/chat/sessions/${sessionId}`, { method: "DELETE" }).catch(() => { })
   }
 
   return (

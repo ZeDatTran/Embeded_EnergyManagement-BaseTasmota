@@ -26,11 +26,10 @@ except FileNotFoundError:
     print("Lỗi: thiếu improved artifacts. Vui lòng chạy 'python -m ml.train_improved_models' trước.")
     exit()
 
-print("Đã tải Improved Ensemble Model và scaler_improved.pkl.")
+print("[OK] Improved Ensemble Model + scaler_improved.pkl loaded.")
 
 # Tên các cột (giống hệt lúc train)
 IMPROVED_FEATURES = [
-    'time_idx', 'linear_trend', 'trend_slope',
     'hour', 'dayofweek', 'month', 'is_weekend', 'quarter', 'is_holiday_period',
     'kwh_lag_1h', 'kwh_lag_24h', 'kwh_lag_48h', 'kwh_lag_168h', 'kwh_lag_336h',
     'kwh_rolling_mean_6h', 'kwh_rolling_std_6h', 'kwh_rolling_min_6h', 'kwh_rolling_max_6h',
@@ -82,9 +81,11 @@ def _build_improved_features(
             return float(forecast_df.loc[t][TARGET])
         return default_val
 
-    def rolling_stat(hours_back_start: int, hours_back_end: int, stat: str, default_val: float) -> float:
-        start = ts - pd.Timedelta(hours=hours_back_start)
-        end = ts - pd.Timedelta(hours=hours_back_end)
+    def rolling_stat(window_hours: int, offset_hours: int, stat: str, default_val: float) -> float:
+        # Lấy `window_hours` giờ gần nhất, bắt đầu từ `offset_hours` trước ts
+        # Ví dụ: rolling_mean_24h → window=24, offset=24 → ts-48h .. ts-24h
+        end = ts - pd.Timedelta(hours=offset_hours)
+        start = end - pd.Timedelta(hours=window_hours)
         idx = pd.date_range(start, end, freq='h')
         values = forecast_df.loc[forecast_df.index.intersection(idx)][TARGET]
         if len(values) == 0:
@@ -105,20 +106,22 @@ def _build_improved_features(
     lag_168 = get_lag(168, lag_48)
     lag_336 = get_lag(336, lag_168)
 
-    rolling_mean_6 = rolling_stat(30, 25, 'mean', lag_24)
-    rolling_std_6 = rolling_stat(30, 25, 'std', 0.0)
-    rolling_min_6 = rolling_stat(30, 25, 'min', lag_24)
-    rolling_max_6 = rolling_stat(30, 25, 'max', lag_24)
+    # rolling_stat(window_hours, offset_hours, stat, default)
+    # Nhất quán với training: shift(24).rolling(window) → lấy window giờ, offset 24h
+    rolling_mean_6 = rolling_stat(6, 24, 'mean', lag_24)
+    rolling_std_6 = rolling_stat(6, 24, 'std', 0.0)
+    rolling_min_6 = rolling_stat(6, 24, 'min', lag_24)
+    rolling_max_6 = rolling_stat(6, 24, 'max', lag_24)
 
-    rolling_mean_24 = rolling_stat(48, 25, 'mean', lag_24)
-    rolling_std_24 = rolling_stat(48, 25, 'std', 0.0)
-    rolling_min_24 = rolling_stat(48, 25, 'min', lag_24)
-    rolling_max_24 = rolling_stat(48, 25, 'max', lag_24)
+    rolling_mean_24 = rolling_stat(24, 24, 'mean', lag_24)
+    rolling_std_24 = rolling_stat(24, 24, 'std', 0.0)
+    rolling_min_24 = rolling_stat(24, 24, 'min', lag_24)
+    rolling_max_24 = rolling_stat(24, 24, 'max', lag_24)
 
-    rolling_mean_48 = rolling_stat(72, 25, 'mean', lag_24)
-    rolling_std_48 = rolling_stat(72, 25, 'std', 0.0)
-    rolling_min_48 = rolling_stat(72, 25, 'min', lag_24)
-    rolling_max_48 = rolling_stat(72, 25, 'max', lag_24)
+    rolling_mean_48 = rolling_stat(48, 24, 'mean', lag_24)
+    rolling_std_48 = rolling_stat(48, 24, 'std', 0.0)
+    rolling_min_48 = rolling_stat(48, 24, 'min', lag_24)
+    rolling_max_48 = rolling_stat(48, 24, 'max', lag_24)
 
     trend_24 = (lag_24 - lag_48) / (lag_48 + 0.01)
     trend_168 = (lag_168 - lag_336) / (lag_336 + 0.01)
@@ -151,9 +154,6 @@ def _build_improved_features(
         'is_weekend': int(ts.dayofweek >= 5),
         'quarter': ((ts.month - 1) // 3) + 1,
         'is_holiday_period': int(ts.month in [1, 12]),
-        'time_idx': time_idx,
-        'linear_trend': linear_trend,
-        'trend_slope': trend_slope,
         'kwh_lag_1h': lag_1,
         'kwh_lag_24h': lag_24,
         'kwh_lag_48h': lag_48,
@@ -257,6 +257,35 @@ async def forecast_with_ensemble(history_df):
         
         new_row = pd.DataFrame({TARGET: [prediction]}, index=[ts])
         forecast_df = pd.concat([forecast_df, new_row])
+
+    # --- AUTO-CALIBRATION (Drift Correction) ---
+    # Autoregressive models inherently drift towards the training set's unconditional mean 
+    # over long horizons. We anchor the forecast baseline to the recent history's baseline,
+    # while preserving the hourly/daily shapes predicted by the model.
+    if len(history_df) >= 24:
+        anchor_df = history_df.tail(14 * 24) # Up to last 14 days
+        recent_mean = float(anchor_df[TARGET].mean())
+        forecast_mean = float(np.mean(hourly_predictions))
+        
+        if recent_mean > 0.01 and forecast_mean > 0.01:
+            drift_ratio = forecast_mean / recent_mean
+            
+            # Allow max 20% deviation from recent baseline (accounting for weekends/temp differences)
+            max_allowed_deviation = 1.20
+            min_allowed_deviation = 0.80
+            
+            calib_factor = 1.0
+            if drift_ratio > max_allowed_deviation:
+                calib_factor = max_allowed_deviation / drift_ratio
+            elif drift_ratio < min_allowed_deviation:
+                calib_factor = min_allowed_deviation / drift_ratio
+                
+            if calib_factor != 1.0:
+                hourly_predictions = [float(p * calib_factor) for p in hourly_predictions]
+                # Update details for inspection
+                for ts_iso in hourly_details:
+                    for model in hourly_details[ts_iso]:
+                        hourly_details[ts_iso][model] *= calib_factor
 
     total_kwh_forecasted = sum(hourly_predictions)
     return total_kwh_forecasted, hourly_predictions, hourly_details
