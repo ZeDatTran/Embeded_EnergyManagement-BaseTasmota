@@ -123,12 +123,17 @@ export function ChatWidget() {
       setInput("")
       setLoading(true)
 
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 120_000) // 120s timeout
+
       try {
         const res = await fetch(`${BACKEND_URL}/api/chat`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ message: content, session_id: sessionId }),
+          signal: controller.signal,
         })
+        clearTimeout(timeoutId)
         const data = await res.json()
         const reply = data.reply || data.message || "Không có phản hồi từ AI."
         setMessages((prev) => [
@@ -141,13 +146,17 @@ export function ChatWidget() {
             isError: data.status !== "success",
           },
         ])
-      } catch (err) {
+      } catch (err: unknown) {
+        clearTimeout(timeoutId)
+        const isTimeout = err instanceof Error && err.name === "AbortError"
         setMessages((prev) => [
           ...prev,
           {
             id: `err-${Date.now()}`,
             role: "assistant",
-            content: " Lỗi kết nối backend. Vui lòng kiểm tra server đang chạy.",
+            content: isTimeout
+              ? "⏱️ Yêu cầu mất quá nhiều thời gian (>120s). AI đang xử lý nhiều dữ liệu — thử lại hoặc đặt câu hỏi đơn giản hơn."
+              : "❌ Lỗi kết nối backend. Vui lòng kiểm tra server đang chạy.",
             timestamp: new Date(),
             isError: true,
           },

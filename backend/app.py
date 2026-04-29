@@ -15,6 +15,7 @@ from app_core.workers import periodic_data_logger, schedule_executor, start_webs
 app = Flask(__name__)
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+shared.socketio_instance = socketio  # expose to chatbot_api for state-sync broadcasts
 
 register_routes(app, socketio)
 app.register_blueprint(chatbot_bp)

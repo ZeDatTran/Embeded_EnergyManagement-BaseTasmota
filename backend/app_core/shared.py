@@ -90,6 +90,7 @@ subscription_to_device_map = {}
 DEVICE_METADATA_CACHE = {}
 CUSTOM_CB_DEVICES = {}
 client_thresholds = {}
+socketio_instance = None   # set by app.py after SocketIO is created
 
 
 def get_tracked_device_ids() -> list[str]:

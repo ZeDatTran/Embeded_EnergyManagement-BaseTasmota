@@ -28,17 +28,21 @@ def register_socket_handlers(socketio):
         data_list = []
         for device_id, info in shared.latest_data.items():
             meta = info.get("metadata", {"type": "unknown", "name": "Unknown", "location": "N/A"})
+            attrs = info.get("attributes", {})
             data_list.append(
                 {
                     "id": device_id,
-                    "type": meta["type"],
-                    "name": meta["name"],
-                    "location": meta["location"],
-                    "attributes": info.get("attributes", {}),
+                    "type": meta.get("type", "unknown"),
+                    "name": meta.get("name", "Unknown"),
+                    "location": meta.get("location", "N/A"),
+                    "attributes": attrs,
                     "telemetry": info.get("telemetry", {}),
+                    "metadata": meta,
+                    "status": "online" if attrs.get("POWER") == "ON" else "offline",
                 }
             )
         emit("dashboard_update", {"data": data_list})
+        logging.info("Sent dashboard snapshot (%d devices) to %s", len(data_list), request.sid)
 
     @socketio.on("join_logs")
     def handle_join_logs():
