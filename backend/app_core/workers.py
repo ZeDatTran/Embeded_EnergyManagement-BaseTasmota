@@ -116,23 +116,25 @@ def schedule_executor(socketio):
 
                     executed_today[schedule_key] = True
 
-                    socketio.emit(
-                        "schedule_executed",
-                        {
-                            "scheduleId": schedule["id"],
-                            "scheduleName": schedule["name"],
-                            "targetId": target_id,
-                            "action": action,
-                            "executedAt": now.isoformat(),
-                        },
-                        room="schedules",
-                    )
+                    user_id = schedule.get("userId")
+                    if user_id:
+                        socketio.emit(
+                            "schedule_executed",
+                            {
+                                "scheduleId": schedule["id"],
+                                "scheduleName": schedule["name"],
+                                "targetId": target_id,
+                                "action": action,
+                                "executedAt": now.isoformat(),
+                            },
+                            room=f"user_{user_id}_schedules",
+                        )
 
                     if schedule.get("runOnce"):
                         deleted = shared.delete_schedule(schedule["id"])
                         if deleted:
                             logging.info("One-time schedule deleted after execution: %s", schedule["id"])
-                            socketio.emit("schedule_deleted", {"id": schedule["id"]}, room="schedules")
+                            socketio.emit("schedule_deleted", {"id": schedule["id"]}, room=f"user_{user_id}_schedules")
                         else:
                             logging.warning(
                                 "One-time schedule could not be deleted after execution: %s",
@@ -148,7 +150,8 @@ def schedule_executor(socketio):
                         "timestamp": now.isoformat(),
                         "details": f"{action} - {schedule['time']}",
                     }
-                    socketio.emit("activity_log", log_entry, room="logs")
+                    if user_id:
+                        socketio.emit("activity_log", log_entry, room=f"user_{user_id}_logs")
 
         except Exception as e:
             logging.error("Schedule executor error: %s", e)
@@ -195,8 +198,15 @@ def start_websocket(socketio):
                         current_val = float(telemetry_keys_found["ENERGY-Current"])
                         display_name = shared.latest_data[device_id]["metadata"]["name"]
 
-                        for sid, threshold in shared.client_thresholds.items():
-                            if current_val > threshold:
+                        cb_config = shared.CUSTOM_CB_DEVICES.get(device_id)
+                        device_user_id = cb_config.get("user_id") if cb_config else None
+
+                        for sid, info in shared.client_thresholds.items():
+                            threshold = info.get("threshold", 100)
+                            client_user_id = info.get("user_id")
+                            
+                            # Only trigger alert if current > threshold AND device belongs to this user
+                            if device_user_id == client_user_id and current_val > threshold:
                                 msg = {
                                     "level": "DANGER",
                                     "device_id": device_id,
@@ -246,7 +256,9 @@ def start_websocket(socketio):
                             "details": f"Trạng thái: {power_val}",
                         }
 
-                        socketio.emit("activity_log", log_entry, room="logs")
+                        cb_config = shared.CUSTOM_CB_DEVICES.get(device_id)
+                        if cb_config and "user_id" in cb_config:
+                            socketio.emit("activity_log", log_entry, room=f"user_{cb_config['user_id']}_logs")
                         logging.info("Activity log sent: %s - %s", action, display_name)
 
                 if shared.FORECAST_ENABLED and "ENERGY-Total" in telemetry_data:
@@ -254,15 +266,17 @@ def start_websocket(socketio):
                     iso_ts = datetime.fromtimestamp(ts_ms / 1000).strftime("%Y-%m-%dT%H:%M:%SZ")
                     shared.process_new_energy(device_id, telemetry_data["ENERGY-Total"][0][1], iso_ts)
 
-                socketio.emit(
-                    "dashboard_update",
-                    {
-                        "device_id": device_id,
-                        "data": shared.latest_data[device_id],
-                        "timestamp": datetime.now().isoformat(),
-                    },
-                    room="dashboard",
-                )
+                cb_config = shared.CUSTOM_CB_DEVICES.get(device_id)
+                if cb_config and "user_id" in cb_config:
+                    socketio.emit(
+                        "dashboard_update",
+                        {
+                            "device_id": device_id,
+                            "data": shared.latest_data[device_id],
+                            "timestamp": datetime.now().isoformat(),
+                        },
+                        room=f"user_{cb_config['user_id']}_dashboard",
+                    )
 
         except json.JSONDecodeError as e:
             logging.error("Error decoding WebSocket message: %s", e)

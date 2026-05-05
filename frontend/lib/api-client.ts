@@ -1,4 +1,5 @@
 // API Client for FE-Son - Communicates with Flask Backend
+import { getAuthHeaders } from './api';
 // Base URL for the backend API
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
 
@@ -59,11 +60,9 @@ export interface ControlResponse {
  */
 export async function fetchDevices(): Promise<Device[]> {
   try {
-    const response = await fetch(`${API_BASE_URL}/check-data`, {
+    const response = await fetch(`${API_BASE_URL}/api/check-data`, {
       method: 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers: getAuthHeaders(),
     });
 
     if (!response.ok) {
@@ -109,12 +108,10 @@ export async function controlDevice(
 
     try {
       const response = await fetch(
-        `${API_BASE_URL}/control/${deviceId}/${commandLower}`,
+        `${API_BASE_URL}/api/control/${deviceId}/${commandLower}`,
         {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
+          headers: getAuthHeaders(),
           signal: controller.signal,
         }
       );
@@ -165,12 +162,10 @@ export async function controlGroupDevices(
 
     try {
       const response = await fetch(
-        `${API_BASE_URL}/control/group/${commandLower}`,
+        `${API_BASE_URL}/api/control/group/${commandLower}`,
         {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
+          headers: getAuthHeaders(),
           signal: controller.signal,
         }
       );
@@ -206,11 +201,9 @@ export async function controlGroupDevices(
  */
 export async function checkApiHealth(): Promise<boolean> {
   try {
-    const response = await fetch(`${API_BASE_URL}/check-token`, {
+    const response = await fetch(`${API_BASE_URL}/api/check-token`, {
       method: 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers: getAuthHeaders(),
     });
 
     return response.ok;
@@ -226,11 +219,9 @@ export async function checkApiHealth(): Promise<boolean> {
  */
 export async function fetchDeviceById(deviceId: string): Promise<Device | null> {
   try {
-    const response = await fetch(`${API_BASE_URL}/device/${deviceId}`, {
+    const response = await fetch(`${API_BASE_URL}/api/device/${deviceId}`, {
       method: 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers: getAuthHeaders(),
     });
 
     if (!response.ok) {
@@ -303,12 +294,10 @@ export async function fetchDeviceHistory(
         }
 
         const response = await fetch(
-          `${API_BASE_URL}/device/${deviceId}/history/full?${params.toString()}`,
+          `${API_BASE_URL}/api/device/${deviceId}/history/full?${params.toString()}`,
           {
             method: 'GET',
-            headers: {
-              'Content-Type': 'application/json',
-            },
+            headers: getAuthHeaders(),
           }
         );
 
@@ -332,11 +321,9 @@ export async function fetchDeviceHistory(
       return allPoints;
     }
 
-    const response = await fetch(`${API_BASE_URL}/device/${deviceId}/history?period=${normalizedPeriod}`, {
+    const response = await fetch(`${API_BASE_URL}/api/device/${deviceId}/history?period=${normalizedPeriod}`, {
       method: 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers: getAuthHeaders(),
     });
 
     if (!response.ok) {

@@ -47,7 +47,7 @@ def _fetch_hourly_power(device_id: str, start_ts: int, end_ts: int, lookback_day
 
 
 def register_analysis_routes(app):
-    @app.route("/analysis/plug-activity-windows", methods=["GET"])
+    @app.route("/api/analysis/plug-activity-windows", methods=["GET"])
     def analyze_plug_activity_windows():
         """Analyze active time windows for each plug directly from CoreIoT hourly power history."""
         try:
@@ -244,7 +244,7 @@ def register_analysis_routes(app):
             logging.error("Error analyzing plug activity windows: %s", e)
             return jsonify({"status": "error", "message": str(e)}), 500
 
-    @app.route("/analysis/monthly-plug-activity", methods=["GET"])
+    @app.route("/api/analysis/monthly-plug-activity", methods=["GET"])
     def analyze_monthly_plug_activity():
         """Analyze plug activity within one month and return active hour windows by day."""
         try:

@@ -1,4 +1,4 @@
-﻿import threading
+import threading
 import logging
 
 from flask import Flask, jsonify, request
@@ -7,6 +7,7 @@ from flask_socketio import SocketIO
 
 from app_core import shared
 from app_core.api import register_routes
+from app_core.auth_routes import register_auth_routes
 from app_core.socket_events import register_socket_handlers
 from app_core.workers import periodic_data_logger, schedule_executor, start_websocket
 
@@ -16,6 +17,7 @@ CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 register_routes(app, socketio)
+register_auth_routes(app)
 register_socket_handlers(socketio)
 
 
@@ -48,6 +50,7 @@ if __name__ == "__main__":
     print(" Schedule Executor Enabled: True")
     print("=" * 60)
 
+    shared.load_devices_from_db()
     start_background_jobs()
 
     if shared.FORECAST_ENABLED:

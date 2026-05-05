@@ -11,6 +11,8 @@ from flask import jsonify, request
 
 from app_core import shared
 from app_core.analysis_routes import register_analysis_routes
+from database import create_device, update_device, delete_device, get_device_by_id
+from app_core.auth_routes import _get_current_user
 
 
 def calculate_vietnam_electricity_bill(total_kwh):
@@ -40,7 +42,7 @@ def calculate_vietnam_electricity_bill(total_kwh):
 def register_routes(app, socketio):
     register_analysis_routes(app)
 
-    @app.route("/", methods=["GET"])
+    @app.route("/api/", methods=["GET"])
     def home():
         endpoints = {
             "/check-data": "Get all device data",
@@ -69,20 +71,27 @@ def register_routes(app, socketio):
             }
         )
 
-    @app.route("/check-data", methods=["GET"])
+    @app.route("/api/check-data", methods=["GET"])
     def check_data():
+        user, err = _get_current_user()
+        if err: return err
+        
         if not shared.verify_token():
             return jsonify({"status": "error", "message": "Invalid JWT_TOKEN"}), 401
 
         if not shared.latest_data:
             logging.warning("/check-data called but no data cached yet. Forcing fetch for configured CB devices.")
-            devices = shared.get_tracked_device_ids()
-            for device_id in devices:
+            user_devices = [k for k, v in shared.CUSTOM_CB_DEVICES.items() if v.get("user_id") == user["id"]]
+            for device_id in user_devices:
                 shared.get_device_telemetry(device_id)
                 shared.get_device_attributes(device_id)
 
         data_array = []
         for device_id, info in shared.latest_data.items():
+            cb_config = shared.CUSTOM_CB_DEVICES.get(device_id)
+            if not cb_config or cb_config.get("user_id") != user["id"]:
+                continue
+                
             meta = info.get("metadata", {"type": "cb", "name": "CB Unknown", "location": "N/A"})
             data_array.append(
                 {
@@ -99,8 +108,11 @@ def register_routes(app, socketio):
         logging.info("API response for /check-data: %s devices (CB)", len(data_array))
         return jsonify({"status": "success", "data": data_array})
 
-    @app.route("/devices/available", methods=["GET"])
+    @app.route("/api/devices/available", methods=["GET"])
     def get_available_devices():
+        user, err = _get_current_user()
+        if err: return err
+        
         if not shared.verify_token():
             return jsonify({"status": "error", "message": "Invalid JWT_TOKEN"}), 401
 
@@ -109,6 +121,10 @@ def register_routes(app, socketio):
 
             available_devices = []
             for device_id in device_ids:
+                cb_config = shared.CUSTOM_CB_DEVICES.get(device_id)
+                if cb_config and cb_config.get("user_id") != user["id"]:
+                    continue
+                    
                 name = "Unknown Device"
                 dev_type = "Unknown"
 
@@ -123,7 +139,7 @@ def register_routes(app, socketio):
                     # Keep placeholder metadata; ID is still valid and group-scoped.
                     pass
 
-                is_configured = device_id in shared.CUSTOM_CB_DEVICES
+                is_configured = cb_config is not None
                 available_devices.append(
                     {
                         "id": device_id,
@@ -131,7 +147,7 @@ def register_routes(app, socketio):
                         "type": dev_type,
                         "isConfigured": is_configured,
                         "configuredAs": (
-                            shared.CUSTOM_CB_DEVICES.get(device_id, {}).get("name") if is_configured else None
+                            cb_config.get("name") if is_configured else None
                         ),
                     }
                 )
@@ -143,8 +159,11 @@ def register_routes(app, socketio):
             logging.error("Error fetching available devices: %s", e)
             return jsonify({"status": "error", "message": "Cannot fetch devices from CoreIoT"}), 500
 
-    @app.route("/devices/cb", methods=["POST"])
+    @app.route("/api/devices/cb", methods=["POST"])
     def add_circuit_breaker():
+        user, err = _get_current_user()
+        if err: return err
+        
         data = request.json
         if not data:
             return jsonify({"status": "error", "message": "No data provided"}), 400
@@ -175,8 +194,16 @@ def register_routes(app, socketio):
             "room_type": room_type,
             "room_name": room_name,
             "floor": floor,
+            "floor": floor,
             "max_load": max_load,
+            "user_id": user["id"],
         }
+        
+        create_device(
+            device_id=device_id, user_id=user["id"], name=name, device_type="cb",
+            location=location, room_type=room_type, room_name=room_name,
+            floor=floor, max_load=max_load
+        )
 
         shared.DEVICE_METADATA_CACHE[device_id] = metadata
         shared.CUSTOM_CB_DEVICES[device_id] = metadata
@@ -197,8 +224,8 @@ def register_routes(app, socketio):
 
         socketio.emit(
             "device_added",
-            {"device_id": device_id, "metadata": metadata, "timestamp": datetime.now().isoformat()},
-            room="dashboard",
+            {"device": {"id": device_id, "metadata": metadata}, "timestamp": datetime.now().isoformat()},
+            room=f"user_{user['id']}_dashboard",
         )
 
         return jsonify(
@@ -220,11 +247,14 @@ def register_routes(app, socketio):
 
     @app.route("/devices/cb/<string:device_id>", methods=["PUT"])
     def update_circuit_breaker(device_id):
-        if device_id not in shared.CUSTOM_CB_DEVICES:
+        user, err = _get_current_user()
+        if err: return err
+        
+        if device_id not in shared.CUSTOM_CB_DEVICES or shared.CUSTOM_CB_DEVICES[device_id].get("user_id") != user["id"]:
             return jsonify(
                 {
                     "status": "error",
-                    "message": "CB not found or cannot be updated (not a custom CB)",
+                    "message": "CB not found or no permission",
                 }
             ), 404
 
@@ -262,7 +292,13 @@ def register_routes(app, socketio):
             "room_name": room_name,
             "floor": floor,
             "max_load": max_load,
+            "user_id": user["id"],
         }
+        
+        update_device(
+            device_id=device_id, name=name, location=location,
+            room_type=room_type, room_name=room_name, floor=floor, max_load=max_load
+        )
 
         shared.DEVICE_METADATA_CACHE[device_id] = metadata
         shared.CUSTOM_CB_DEVICES[device_id] = metadata
@@ -281,7 +317,7 @@ def register_routes(app, socketio):
         socketio.emit(
             "device_updated",
             {"device_id": device_id, "metadata": metadata, "timestamp": datetime.now().isoformat()},
-            room="dashboard",
+            room=f"user_{user['id']}_dashboard",
         )
 
         return jsonify(
@@ -301,13 +337,16 @@ def register_routes(app, socketio):
             }
         )
 
-    @app.route("/devices/cb/<string:device_id>", methods=["DELETE"])
+    @app.route("/api/devices/cb/<string:device_id>", methods=["DELETE"])
     def delete_circuit_breaker(device_id):
-        if device_id not in shared.CUSTOM_CB_DEVICES:
+        user, err = _get_current_user()
+        if err: return err
+        
+        if device_id not in shared.CUSTOM_CB_DEVICES or shared.CUSTOM_CB_DEVICES[device_id].get("user_id") != user["id"]:
             return jsonify(
                 {
                     "status": "error",
-                    "message": "CB not found or cannot be deleted (not a custom CB)",
+                    "message": "CB not found or no permission",
                 }
             ), 404
 
@@ -318,17 +357,24 @@ def register_routes(app, socketio):
             del shared.CUSTOM_CB_DEVICES[device_id]
         if device_id in shared.latest_data:
             del shared.latest_data[device_id]
+            
+        delete_device(device_id)
 
         logging.info("Deleted CB: %s (ID: %s)", cb_name, device_id)
 
-        socketio.emit("device_removed", {"device_id": device_id, "timestamp": datetime.now().isoformat()}, room="dashboard")
+        socketio.emit("device_removed", {"device_id": device_id, "timestamp": datetime.now().isoformat()}, room=f"user_{user['id']}_dashboard")
 
         return jsonify({"status": "success", "message": f"CB '{cb_name}' deleted successfully"})
 
-    @app.route("/devices/cb", methods=["GET"])
+    @app.route("/api/devices/cb", methods=["GET"])
     def list_circuit_breakers():
+        user, err = _get_current_user()
+        if err: return err
+        
         cb_list = []
         for device_id, meta in shared.CUSTOM_CB_DEVICES.items():
+            if meta.get("user_id") != user["id"]:
+                continue
             device_info = shared.latest_data.get(device_id, {})
             cb_list.append(
                 {
@@ -347,14 +393,20 @@ def register_routes(app, socketio):
 
         return jsonify({"status": "success", "data": cb_list, "count": len(cb_list)})
 
-    @app.route("/check-token", methods=["GET"])
+    @app.route("/api/check-token", methods=["GET"])
     def check_token():
         if shared.verify_token():
             return jsonify({"status": "success", "message": "JWT_TOKEN is valid"})
         return jsonify({"status": "error", "message": "Invalid JWT_TOKEN"}), 401
 
-    @app.route("/device/<string:device_id>", methods=["GET"])
+    @app.route("/api/device/<string:device_id>", methods=["GET"])
     def get_device_detail(device_id):
+        user, err = _get_current_user()
+        if err: return err
+        
+        if device_id in shared.CUSTOM_CB_DEVICES and shared.CUSTOM_CB_DEVICES[device_id].get("user_id") != user["id"]:
+             return jsonify({"status": "error", "message": "No permission"}), 403
+             
         logging.info("Device detail request for: %s", device_id)
 
         if device_id in shared.latest_data:
@@ -398,8 +450,14 @@ def register_routes(app, socketio):
 
         return jsonify({"status": "error", "message": "Device not found"}), 404
 
-    @app.route("/device/<string:device_id>/history", methods=["GET"])
+    @app.route("/api/device/<string:device_id>/history", methods=["GET"])
     def get_device_history(device_id):
+        user, err = _get_current_user()
+        if err: return err
+        
+        if device_id in shared.CUSTOM_CB_DEVICES and shared.CUSTOM_CB_DEVICES[device_id].get("user_id") != user["id"]:
+             return jsonify({"status": "error", "message": "No permission"}), 403
+             
         period = request.args.get("period", "day").lower()
         full_mode = period == "all"
         logging.info("Device history request for: %s, period: %s", device_id, period)
@@ -993,7 +1051,7 @@ def register_routes(app, socketio):
             logging.error("Error fetching device history: %s", e)
             return jsonify({"status": "error", "message": str(e), "history": []}), 500
 
-    @app.route("/device/<string:device_id>/history/full", methods=["GET"])
+    @app.route("/api/device/<string:device_id>/history/full", methods=["GET"])
     def get_device_history_full(device_id):
         # Reuse the same logic through period=all so frontend can call either form.
         args = request.args.to_dict(flat=True)
@@ -1001,12 +1059,19 @@ def register_routes(app, socketio):
         with app.test_request_context(query_string=args):
             return get_device_history(device_id)
 
-    @app.route("/control/<string:device_id>/<string:command>", methods=["POST"])
+    @app.route("/api/control/<string:device_id>/<string:command>", methods=["POST"])
     def control_specific_device(device_id, command):
         logging.info("Control request: Device %s, Command: %s", device_id, command)
 
+        user, err = _get_current_user()
+        if err: return err
+
         if not shared.verify_token():
             return jsonify({"status": "error", "message": "Invalid JWT_TOKEN"}), 401
+            
+        cb_config = shared.CUSTOM_CB_DEVICES.get(device_id)
+        if not cb_config or cb_config.get("user_id") != user["id"]:
+            return jsonify({"status": "error", "message": "Device not found or unauthorized"}), 404
         if command.lower() not in ["on", "off"]:
             return jsonify({"status": "error", "message": "Invalid command. Only 'on' or 'off' accepted."}), 400
 
@@ -1017,9 +1082,12 @@ def register_routes(app, socketio):
         status_code = 401 if "Token" in result.get("message", "") else 500
         return jsonify(result), status_code
 
-    @app.route("/control/group/<string:command>", methods=["POST"])
+    @app.route("/api/control/group/<string:command>", methods=["POST"])
     def control_group_devices(command):
         logging.info("Group control request: Command: %s", command)
+
+        user, err = _get_current_user()
+        if err: return err
 
         if not shared.verify_token():
             return jsonify({"status": "error", "message": "Invalid JWT_TOKEN"}), 401
@@ -1027,9 +1095,9 @@ def register_routes(app, socketio):
             return jsonify({"status": "error", "message": "Invalid command. Only 'on' or 'off' accepted."}), 400
 
         try:
-            device_ids = shared.get_devices_from_group()
+            device_ids = [k for k, v in shared.CUSTOM_CB_DEVICES.items() if v.get("user_id") == user["id"]]
             if not device_ids:
-                return jsonify({"status": "error", "message": "No devices found in group."}), 404
+                return jsonify({"status": "error", "message": "No devices found for user."}), 404
         except Exception as e:
             return jsonify({"status": "error", "message": f"Error getting device list: {e}"}), 500
 
@@ -1052,18 +1120,25 @@ def register_routes(app, socketio):
         }
         return jsonify(summary), 200 if all_success else 207
 
-    @app.route("/schedules", methods=["GET"])
+    @app.route("/api/schedules", methods=["GET"])
     def get_schedules():
         try:
+            user, err = _get_current_user()
+            if err: return err
+            
             schedules = shared.get_all_schedules()
-            return jsonify(schedules), 200
+            user_schedules = [s for s in schedules if s.get("userId") == user["id"]]
+            return jsonify(user_schedules), 200
         except Exception as e:
             logging.error("Error fetching schedules: %s", e)
             return jsonify({"status": "error", "message": str(e)}), 500
 
-    @app.route("/schedules", methods=["POST"])
+    @app.route("/api/schedules", methods=["POST"])
     def create_new_schedule():
         try:
+            user, err = _get_current_user()
+            if err: return err
+            
             data = request.get_json()
             required_fields = ["name", "targetId", "action", "time", "days"]
             for field in required_fields:
@@ -1098,30 +1173,41 @@ def register_routes(app, socketio):
                 days=data["days"],
                 enabled=enabled,
                 run_once=run_once,
+                user_id=user["id"],
             )
 
             logging.info("Schedule created: %s - %s", schedule["id"], schedule["name"])
-            socketio.emit("schedule_created", schedule, room="schedules")
+            socketio.emit("schedule_created", schedule, room=f"user_{user['id']}_schedules")
             return jsonify(schedule), 201
 
         except Exception as e:
             logging.error("Error creating schedule: %s", e)
             return jsonify({"status": "error", "message": str(e)}), 500
 
-    @app.route("/schedules/<string:schedule_id>", methods=["GET"])
+    @app.route("/api/schedules/<string:schedule_id>", methods=["GET"])
     def get_single_schedule(schedule_id):
         try:
+            user, err = _get_current_user()
+            if err: return err
+            
             schedule = shared.get_schedule_by_id(schedule_id)
-            if schedule:
+            if schedule and schedule.get("userId") == user["id"]:
                 return jsonify(schedule), 200
             return jsonify({"status": "error", "message": "Schedule not found"}), 404
         except Exception as e:
             logging.error("Error fetching schedule %s: %s", schedule_id, e)
             return jsonify({"status": "error", "message": str(e)}), 500
 
-    @app.route("/schedules/<string:schedule_id>", methods=["PUT"])
+    @app.route("/api/schedules/<string:schedule_id>", methods=["PUT"])
     def update_existing_schedule(schedule_id):
         try:
+            user, err = _get_current_user()
+            if err: return err
+            
+            current_schedule = shared.get_schedule_by_id(schedule_id)
+            if not current_schedule or current_schedule.get("userId") != user["id"]:
+                return jsonify({"status": "error", "message": "Schedule not found or no permission"}), 404
+                
             data = request.get_json()
             if "action" in data and data["action"] not in ["on", "off"]:
                 return jsonify({"status": "error", "message": "Action must be 'on' or 'off'"}), 400
@@ -1146,9 +1232,6 @@ def register_routes(app, socketio):
             run_once_value = data.get("runOnce")
             next_days = data.get("days")
             if run_once_value is None:
-                current_schedule = shared.get_schedule_by_id(schedule_id)
-                if not current_schedule:
-                    return jsonify({"status": "error", "message": "Schedule not found"}), 404
                 run_once_value = bool(current_schedule.get("runOnce", False))
                 if next_days is None:
                     next_days = current_schedule.get("days", [])
@@ -1169,7 +1252,7 @@ def register_routes(app, socketio):
 
             if schedule:
                 logging.info("Schedule updated: %s", schedule_id)
-                socketio.emit("schedule_updated", schedule, room="schedules")
+                socketio.emit("schedule_updated", schedule, room=f"user_{user['id']}_schedules")
                 return jsonify(schedule), 200
 
             return jsonify({"status": "error", "message": "Schedule not found"}), 404
@@ -1178,25 +1261,35 @@ def register_routes(app, socketio):
             logging.error("Error updating schedule %s: %s", schedule_id, e)
             return jsonify({"status": "error", "message": str(e)}), 500
 
-    @app.route("/schedules/<string:schedule_id>", methods=["DELETE"])
+    @app.route("/api/schedules/<string:schedule_id>", methods=["DELETE"])
     def delete_existing_schedule(schedule_id):
         try:
+            user, err = _get_current_user()
+            if err: return err
+            
+            current_schedule = shared.get_schedule_by_id(schedule_id)
+            if not current_schedule or current_schedule.get("userId") != user["id"]:
+                return jsonify({"status": "error", "message": "Schedule not found or no permission"}), 404
+                
             success = shared.delete_schedule(schedule_id)
             if success:
                 logging.info("Schedule deleted: %s", schedule_id)
-                socketio.emit("schedule_deleted", {"id": schedule_id}, room="schedules")
+                socketio.emit("schedule_deleted", {"id": schedule_id}, room=f"user_{user['id']}_schedules")
                 return jsonify({"status": "success", "message": "Schedule deleted"}), 200
             return jsonify({"status": "error", "message": "Schedule not found"}), 404
         except Exception as e:
             logging.error("Error deleting schedule %s: %s", schedule_id, e)
             return jsonify({"status": "error", "message": str(e)}), 500
 
-    @app.route("/schedules/<string:schedule_id>/toggle", methods=["POST"])
+    @app.route("/api/schedules/<string:schedule_id>/toggle", methods=["POST"])
     def toggle_schedule(schedule_id):
         try:
+            user, err = _get_current_user()
+            if err: return err
+            
             schedule = shared.get_schedule_by_id(schedule_id)
-            if not schedule:
-                return jsonify({"status": "error", "message": "Schedule not found"}), 404
+            if not schedule or schedule.get("userId") != user["id"]:
+                return jsonify({"status": "error", "message": "Schedule not found or no permission"}), 404
 
             updated = shared.update_schedule(schedule_id=schedule_id, enabled=not schedule["enabled"])
             if updated:
@@ -1205,7 +1298,7 @@ def register_routes(app, socketio):
                     schedule_id,
                     "enabled" if updated["enabled"] else "disabled",
                 )
-                socketio.emit("schedule_updated", updated, room="schedules")
+                socketio.emit("schedule_updated", updated, room=f"user_{user['id']}_schedules")
                 return jsonify(updated), 200
 
             return jsonify({"status": "error", "message": "Failed to toggle schedule"}), 500
@@ -1214,10 +1307,13 @@ def register_routes(app, socketio):
             logging.error("Error toggling schedule %s: %s", schedule_id, e)
             return jsonify({"status": "error", "message": str(e)}), 500
 
-    @app.route("/schedules/auto-scenarios", methods=["POST"])
+    @app.route("/api/schedules/auto-scenarios", methods=["POST"])
     def generate_auto_scenarios():
         """Generate data-driven on/off schedules from historical hourly energy usage."""
         try:
+            user, err = _get_current_user()
+            if err: return err
+
             payload = request.get_json(silent=True) or {}
             lookback_days = int(payload.get("lookbackDays", 14) or 14)
             max_devices = int(payload.get("maxDevices", 8) or 8)
@@ -1456,13 +1552,14 @@ def register_routes(app, socketio):
                                 "lookbackDays": lookback_days,
                                 "deviceId": device_id,
                             },
+                            user_id=user["id"],
                         )
                         created_schedules.append(created)
                         existing_keys.add(dedupe_key)
 
             if auto_apply and created_schedules:
                 for schedule in created_schedules:
-                    socketio.emit("schedule_created", schedule, room="schedules")
+                    socketio.emit("schedule_created", schedule, room=f"user_{user['id']}_schedules")
 
             return jsonify(
                 {
@@ -1618,7 +1715,7 @@ def register_routes(app, socketio):
 
             return round(max(0.0, total_kwh), 6)
 
-        @app.route("/forecast", methods=["GET"])
+        @app.route("/api/forecast", methods=["GET"])
         def trigger_forecast():
             logging.info("--- MANUAL FORECAST TRIGGERED ---")
             try:
@@ -1738,7 +1835,7 @@ def register_routes(app, socketio):
 
             return jsonify({"status": "error", "message": "AI Server not responding"}), 500
 
-        @app.route("/forecast/push-coreiot", methods=["POST"])
+        @app.route("/api/forecast/push-coreiot", methods=["POST"])
         def push_forecast_to_coreiot():
             """Push latest forecast analysis data to CoreIoT as telemetry."""
             data = request.json or {}
@@ -1778,7 +1875,7 @@ def register_routes(app, socketio):
                 return jsonify({"status": "success", "result": result})
             return jsonify({"status": "error", "result": result}), 502
 
-        @app.route("/forecast/by-plug", methods=["GET"])
+        @app.route("/api/forecast/by-plug", methods=["GET"])
         def forecast_by_plug():
             """Forecast energy consumption for each plug individually."""
             logging.info("--- FORECAST BY PLUG TRIGGERED ---")
@@ -1985,7 +2082,7 @@ def register_routes(app, socketio):
             logging.info("FORECAST BY PLUG COMPLETE -> Total Bill: %d VND", round(total_bill))
             return jsonify(response)
 
-        @app.route("/forecast/summary", methods=["GET"])
+        @app.route("/api/forecast/summary", methods=["GET"])
         def get_forecast_summary():
             try:
                 if os.path.exists(FORECAST_RESULT_PATH):
@@ -2015,8 +2112,11 @@ def register_routes(app, socketio):
                 logging.error("Error reading forecast summary: %s", e)
                 return jsonify({"status": "error", "message": str(e)}), 500
 
-        @app.route("/energy", methods=["GET"])
+        @app.route("/api/energy", methods=["GET"])
         def get_energy_data():
+            user, err = _get_current_user()
+            if err: return err
+            
             period = request.args.get("period", "day")
             requested_device_id = (request.args.get("deviceId") or "").strip()
             now = datetime.now()
@@ -2037,13 +2137,14 @@ def register_routes(app, socketio):
             start_ts = int(start_time.timestamp() * 1000)
             end_ts = int(now.timestamp() * 1000)
 
-            # Prefer tracked CB devices; fallback to all devices in group.
+            # Prefer tracked CB devices for current user
             if requested_device_id:
                 device_ids = [requested_device_id]
             else:
-                device_ids = shared.get_tracked_device_ids()
-                if not device_ids:
-                    device_ids = shared.get_devices_from_group()
+                device_ids = shared.get_tracked_device_ids(user["id"])
+            
+            if not device_ids:
+                return jsonify([])
 
             # Determine aggregation interval based on period
             # Day: hourly, Week/Month: daily
@@ -2168,12 +2269,15 @@ def register_routes(app, socketio):
 
             return jsonify(response_data)
 
-        @app.route("/energy/summary", methods=["GET"])
+        @app.route("/api/energy/summary", methods=["GET"])
         def get_energy_summary():
             """Return energy summary for Energy page cards.
             For 'day': Calculate from hourly telemetry (ENERGY-Power) like the chart
             For 'month': Use cumulative total (ENERGY-Total)
             """
+            user, err = _get_current_user()
+            if err: return err
+            
             period = request.args.get("period", "month")
             requested_device_id = (request.args.get("deviceId") or "").strip()
 
@@ -2183,9 +2287,10 @@ def register_routes(app, socketio):
             if requested_device_id:
                 device_ids = [requested_device_id]
             else:
-                device_ids = shared.get_tracked_device_ids()
-                if not device_ids:
-                    device_ids = shared.get_devices_from_group()
+                device_ids = shared.get_tracked_device_ids(user["id"])
+            
+            if not device_ids:
+                return jsonify({"status": "success", "data": {"totalConsumption": 0.0, "totalCost": 0.0}})
 
             total_kwh = 0.0
 
@@ -2223,8 +2328,37 @@ def register_routes(app, socketio):
                         logging.warning("Energy summary (day) skipped device %s due to error: %s", device_id, e)
 
             else:
-                # For 'month': single source of truth shared with forecast input.
-                total_kwh = _month_consumption_from_energy_summary_source(20.0)
+                # For 'month': Calculate from daily power data to be consistent with chart and user filtering
+                now = datetime.now()
+                start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+                start_ts = int(start_of_month.timestamp() * 1000)
+                end_ts = int(now.timestamp() * 1000)
+
+                for device_id in device_ids:
+                    try:
+                        url = f"{shared.CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/values/timeseries"
+                        params = {
+                            "keys": "ENERGY-Power",
+                            "startTs": start_ts,
+                            "endTs": end_ts,
+                            "limit": 10000,
+                            "agg": "AVG",
+                            "interval": 86400000,  # daily
+                        }
+                        resp = requests.get(url, headers=shared.HEADERS, params=params, timeout=20)
+                        resp.raise_for_status()
+                        raw = resp.json()
+
+                        for entry in raw.get("ENERGY-Power", []):
+                            try:
+                                power_w = float(entry.get("value") or 0.0)
+                                # Convert: power [W] × 24 hours / 1000 = kWh per day
+                                kwh_day = max(0.0, power_w) * 24.0 / 1000.0
+                                total_kwh += kwh_day
+                            except (TypeError, ValueError):
+                                continue
+                    except Exception as e:
+                        logging.warning("Energy summary (month) skipped device %s due to error: %s", device_id, e)
 
             total_kwh = round(max(0.0, total_kwh), 4)
             total_cost = round(calculate_vietnam_electricity_bill(total_kwh), 2)

@@ -3,6 +3,18 @@ const API_BASE_URL = "http://localhost:5000";
 
 import { aggregateEnergyDataByDay } from "./utils";
 
+export function getAuthHeaders(): HeadersInit {
+  if (typeof window === "undefined") return { "Content-Type": "application/json" };
+  const token = localStorage.getItem("smart_home_token");
+  if (token) {
+    return {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${token}`
+    };
+  }
+  return { "Content-Type": "application/json" };
+}
+
 export interface Device {
   id: string;
   name: string;
@@ -174,7 +186,9 @@ export interface GeneratedEnergyPlan {
 // API functions
 export async function fetchDevices(): Promise<Device[]> {
   try {
-    const response = await fetch(`${API_BASE_URL}/check-data`);
+    const response = await fetch(`${API_BASE_URL}/api/check-data`, {
+      headers: getAuthHeaders(),
+    });
     if (!response.ok) throw new Error("Failed to fetch devices");
     const result = await response.json();
 
@@ -223,7 +237,9 @@ export async function fetchDevices(): Promise<Device[]> {
 // Fetch available devices from CoreIoT for adding new CB
 export async function fetchAvailableDevices(): Promise<AvailableDevice[]> {
   try {
-    const response = await fetch(`${API_BASE_URL}/devices/available`);
+    const response = await fetch(`${API_BASE_URL}/api/devices/available`, {
+      headers: getAuthHeaders(),
+    });
     if (!response.ok) throw new Error("Failed to fetch available devices");
     const result = await response.json();
 
@@ -240,9 +256,9 @@ export async function fetchAvailableDevices(): Promise<AvailableDevice[]> {
 
 export async function controlAllDevices(command: "ON" | "OFF"): Promise<Device[]> {
   try {
-    const response = await fetch(`${API_BASE_URL}/control/group/${command}`, {
+    const response = await fetch(`${API_BASE_URL}/api/control/group/${command}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: getAuthHeaders(),
     })
     if (!response.ok) throw new Error("Failed to control devices")
     const data = await response.json()
@@ -269,7 +285,9 @@ export async function fetchEnergyData(
     if (deviceId) {
       query.set("deviceId", deviceId);
     }
-    const response = await fetch(`${API_BASE_URL}/energy?${query.toString()}`);
+    const response = await fetch(`${API_BASE_URL}/api/energy?${query.toString()}`, {
+      headers: getAuthHeaders(),
+    });
     if (!response.ok) throw new Error("Failed to fetch energy data");
     
     const data: EnergyData[] = await response.json();
@@ -293,7 +311,9 @@ export async function fetchEnergySummary(
     if (deviceId) {
       query.set("deviceId", deviceId);
     }
-    const response = await fetch(`${API_BASE_URL}/energy/summary?${query.toString()}`);
+    const response = await fetch(`${API_BASE_URL}/api/energy/summary?${query.toString()}`, {
+      headers: getAuthHeaders(),
+    });
     if (!response.ok) throw new Error("Failed to fetch energy summary");
 
     const result = await response.json();
@@ -312,9 +332,9 @@ export async function addCircuitBreaker(
   cbData: CircuitBreakerInput
 ): Promise<{ success: boolean; message?: string; device?: Device }> {
   try {
-    const response = await fetch(`${API_BASE_URL}/devices/cb`, {
+    const response = await fetch(`${API_BASE_URL}/api/devices/cb`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: getAuthHeaders(),
       body: JSON.stringify(cbData),
     });
 
@@ -347,9 +367,9 @@ export async function updateCircuitBreaker(
   cbData: CircuitBreakerInput
 ): Promise<{ success: boolean; message?: string; device?: Device }> {
   try {
-    const response = await fetch(`${API_BASE_URL}/devices/cb/${deviceId}`, {
+    const response = await fetch(`${API_BASE_URL}/api/devices/cb/${deviceId}`, {
       method: "PUT",
-      headers: { "Content-Type": "application/json" },
+      headers: getAuthHeaders(),
       body: JSON.stringify(cbData),
     });
 
@@ -380,8 +400,9 @@ export async function deleteCircuitBreaker(
   deviceId: string
 ): Promise<{ success: boolean; message?: string }> {
   try {
-    const response = await fetch(`${API_BASE_URL}/devices/cb/${deviceId}`, {
+    const response = await fetch(`${API_BASE_URL}/api/devices/cb/${deviceId}`, {
       method: "DELETE",
+      headers: getAuthHeaders(),
     });
 
     const result = await response.json();
@@ -436,7 +457,9 @@ function getMockLogs(): ActivityLog[] {
 
 export async function fetchCurrentBudget(monthKey?: string): Promise<{ budget: EnergyBudgetProfile | null; analysis: BudgetAnalysis }> {
   const query = monthKey ? `?monthKey=${monthKey}` : "";
-  const response = await fetch(`${API_BASE_URL}/energy-budget/current${query}`);
+  const response = await fetch(`${API_BASE_URL}/api/energy-budget/current${query}`, {
+    headers: getAuthHeaders(),
+  });
   if (!response.ok) throw new Error("Failed to fetch current budget");
   const result = await response.json();
   return result.data;
@@ -449,9 +472,9 @@ export async function saveCurrentBudget(input: {
   optimizationMode: "manual" | "assisted" | "automatic";
   autoApplyRecommendations: boolean;
 }): Promise<{ budget: EnergyBudgetProfile; analysis: BudgetAnalysis }> {
-  const response = await fetch(`${API_BASE_URL}/energy-budget/current`, {
+  const response = await fetch(`${API_BASE_URL}/api/energy-budget/current`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
+    headers: getAuthHeaders(),
     body: JSON.stringify(input),
   });
   const result = await response.json();
@@ -460,7 +483,9 @@ export async function saveCurrentBudget(input: {
 }
 
 export async function fetchBudgetHistory(): Promise<EnergyBudgetProfile[]> {
-  const response = await fetch(`${API_BASE_URL}/energy-budget/history`);
+  const response = await fetch(`${API_BASE_URL}/api/energy-budget/history`, {
+    headers: getAuthHeaders(),
+  });
   if (!response.ok) throw new Error("Failed to fetch budget history");
   const result = await response.json();
   return result.data || [];
@@ -468,14 +493,18 @@ export async function fetchBudgetHistory(): Promise<EnergyBudgetProfile[]> {
 
 export async function fetchEnergyPlanAnalysis(monthKey?: string): Promise<BudgetAnalysis> {
   const query = monthKey ? `?monthKey=${monthKey}` : "";
-  const response = await fetch(`${API_BASE_URL}/energy-plan/analysis/current${query}`);
+  const response = await fetch(`${API_BASE_URL}/api/energy-plan/analysis/current${query}`, {
+    headers: getAuthHeaders(),
+  });
   if (!response.ok) throw new Error("Failed to fetch energy plan analysis");
   const result = await response.json();
   return result.data;
 }
 
 export async function fetchEnergyPlanDevices(): Promise<BudgetAnalysisDevice[]> {
-  const response = await fetch(`${API_BASE_URL}/energy-plan/analysis/devices`);
+  const response = await fetch(`${API_BASE_URL}/api/energy-plan/analysis/devices`, {
+    headers: getAuthHeaders(),
+  });
   if (!response.ok) throw new Error("Failed to fetch device analysis");
   const result = await response.json();
   return result.data || [];
@@ -486,9 +515,9 @@ export async function generateEnergyPlan(input: {
   planningHorizonDays: number;
   strategy: "conservative" | "balanced" | "aggressive";
 }): Promise<GeneratedEnergyPlan> {
-  const response = await fetch(`${API_BASE_URL}/energy-plan/generate`, {
+  const response = await fetch(`${API_BASE_URL}/api/energy-plan/generate`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: getAuthHeaders(),
     body: JSON.stringify(input),
   });
   const result = await response.json();
@@ -497,35 +526,48 @@ export async function generateEnergyPlan(input: {
 }
 
 export async function fetchRecommendationRuns(limit = 20): Promise<RecommendationRun[]> {
-  const response = await fetch(`${API_BASE_URL}/energy-plan/runs?limit=${limit}`);
+  const response = await fetch(`${API_BASE_URL}/api/energy-plan/runs?limit=${limit}`, {
+    headers: getAuthHeaders(),
+  });
   if (!response.ok) throw new Error("Failed to fetch recommendation runs");
   const result = await response.json();
   return result.data || [];
 }
 
 export async function fetchRecommendationActions(runId: string): Promise<RecommendationAction[]> {
-  const response = await fetch(`${API_BASE_URL}/energy-plan/runs/${runId}/actions`);
+  const response = await fetch(`${API_BASE_URL}/api/energy-plan/runs/${runId}/actions`, {
+    headers: getAuthHeaders(),
+  });
   if (!response.ok) throw new Error("Failed to fetch recommendation actions");
   const result = await response.json();
   return result.data || [];
 }
 
 export async function approveRecommendationAction(actionId: string): Promise<RecommendationAction> {
-  const response = await fetch(`${API_BASE_URL}/energy-plan/actions/${actionId}/approve`, { method: "POST" });
+  const response = await fetch(`${API_BASE_URL}/api/energy-plan/actions/${actionId}/approve`, {
+    method: "POST",
+    headers: getAuthHeaders(),
+  });
   const result = await response.json();
   if (!response.ok) throw new Error(result.message || "Failed to approve action");
   return result.data;
 }
 
 export async function rejectRecommendationAction(actionId: string): Promise<RecommendationAction> {
-  const response = await fetch(`${API_BASE_URL}/energy-plan/actions/${actionId}/reject`, { method: "POST" });
+  const response = await fetch(`${API_BASE_URL}/api/energy-plan/actions/${actionId}/reject`, {
+    method: "POST",
+    headers: getAuthHeaders(),
+  });
   const result = await response.json();
   if (!response.ok) throw new Error(result.message || "Failed to reject action");
   return result.data;
 }
 
 export async function applyRecommendationRun(runId: string): Promise<{ runId: string; createdSchedulesCount: number; createdScheduleIds: string[] }> {
-  const response = await fetch(`${API_BASE_URL}/energy-plan/runs/${runId}/apply`, { method: "POST" });
+  const response = await fetch(`${API_BASE_URL}/api/energy-plan/runs/${runId}/apply`, {
+    method: "POST",
+    headers: getAuthHeaders(),
+  });
   const result = await response.json();
   if (!response.ok) throw new Error(result.message || "Failed to apply recommendation run");
   return result.data;

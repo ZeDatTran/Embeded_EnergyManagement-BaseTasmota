@@ -1,4 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
+import { getAuthHeaders } from "@/lib/api"
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000"
 
@@ -47,7 +48,9 @@ export function useSchedules() {
   return useQuery({
     queryKey: ["schedules"],
     queryFn: async () => {
-      const response = await fetch(`${API_BASE_URL}/schedules`)
+      const response = await fetch(`${API_BASE_URL}/api/schedules`, {
+        headers: getAuthHeaders(),
+      })
       if (!response.ok) {
         throw new Error("Failed to fetch schedules")
       }
@@ -60,11 +63,9 @@ export function useCreateSchedule() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: async (data: Omit<Schedule, "id" | "createdAt">) => {
-      const response = await fetch(`${API_BASE_URL}/schedules`, {
+      const response = await fetch(`${API_BASE_URL}/api/schedules`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: getAuthHeaders(),
         body: JSON.stringify(data),
       })
       if (!response.ok) {
@@ -83,11 +84,9 @@ export function useUpdateSchedule() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: async (data: Schedule) => {
-      const response = await fetch(`${API_BASE_URL}/schedules/${data.id}`, {
+      const response = await fetch(`${API_BASE_URL}/api/schedules/${data.id}`, {
         method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: getAuthHeaders(),
         body: JSON.stringify(data),
       })
       if (!response.ok) {
@@ -106,8 +105,9 @@ export function useDeleteSchedule() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: async (id: string) => {
-      const response = await fetch(`${API_BASE_URL}/schedules/${id}`, {
+      const response = await fetch(`${API_BASE_URL}/api/schedules/${id}`, {
         method: "DELETE",
+        headers: getAuthHeaders(),
       })
       if (!response.ok) {
         const error = await response.json()
@@ -125,8 +125,9 @@ export function useToggleSchedule() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: async (id: string) => {
-      const response = await fetch(`${API_BASE_URL}/schedules/${id}/toggle`, {
+      const response = await fetch(`${API_BASE_URL}/api/schedules/${id}/toggle`, {
         method: "POST",
+        headers: getAuthHeaders(),
       })
       if (!response.ok) {
         const error = await response.json()
@@ -144,11 +145,9 @@ export function useGenerateAutoScenarios() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: async (payload: AutoScenarioRequest = {}) => {
-      const response = await fetch(`${API_BASE_URL}/schedules/auto-scenarios`, {
+      const response = await fetch(`${API_BASE_URL}/api/schedules/auto-scenarios`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: getAuthHeaders(),
         body: JSON.stringify(payload),
       })
 

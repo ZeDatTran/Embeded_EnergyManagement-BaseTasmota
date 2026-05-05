@@ -12,12 +12,17 @@ export function initSocket(queryClient: QueryClient): Socket {
     socket.disconnect()
   }
 
+  const token = typeof window !== 'undefined' ? localStorage.getItem("smart_home_token") : null
+
   socket = io(process.env.NEXT_PUBLIC_SOCKET_URL || "http://localhost:5000", {
     reconnection: true,
     reconnectionDelay: 1000,
     reconnectionDelayMax: 5000,
     reconnectionAttempts: 5,
     transports: ['websocket', 'polling'],
+    auth: {
+      token: token
+    }
   })
 
   // Listen for connection

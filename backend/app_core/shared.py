@@ -22,6 +22,7 @@ from database import (
     log_schedule_execution,
     save_plug_hourly_energy,
     update_schedule,
+    get_all_devices,
 )
 
 try:
@@ -92,8 +93,31 @@ CUSTOM_CB_DEVICES = {}
 client_thresholds = {}
 
 
-def get_tracked_device_ids() -> list[str]:
-    """Return device IDs explicitly configured by users."""
+def load_devices_from_db():
+    global CUSTOM_CB_DEVICES, DEVICE_METADATA_CACHE
+    devices = get_all_devices()
+    CUSTOM_CB_DEVICES.clear()
+    DEVICE_METADATA_CACHE.clear()
+    for dev in devices:
+        meta = {
+            "type": dev.get("type", "cb"),
+            "name": dev.get("name"),
+            "location": dev.get("location"),
+            "room_type": dev.get("roomType"),
+            "room_name": dev.get("roomName"),
+            "floor": dev.get("floor"),
+            "max_load": dev.get("maxLoad"),
+            "user_id": dev.get("userId"),
+        }
+        CUSTOM_CB_DEVICES[dev["id"]] = meta
+        DEVICE_METADATA_CACHE[dev["id"]] = meta
+    logging.info(f"Loaded {len(CUSTOM_CB_DEVICES)} devices from DB into cache")
+
+
+def get_tracked_device_ids(user_id: int = None) -> list[str]:
+    """Return device IDs explicitly configured by users. If user_id is provided, return only devices for that user."""
+    if user_id is not None:
+        return [dev_id for dev_id, meta in CUSTOM_CB_DEVICES.items() if meta.get("user_id") == user_id]
     return list(CUSTOM_CB_DEVICES.keys())
 
 if FORECAST_ENABLED:
@@ -195,7 +219,13 @@ def process_new_energy(device_id, total_energy_str, ts_iso):
                 )
 
                 save_hourly_kwh(key, hourly_kwh_global[key])
-                save_plug_hourly_energy(device_id, key, round(delta, 4), source="coreiot")
+                dev_meta = CUSTOM_CB_DEVICES.get(device_id, {})
+                dev_name = dev_meta.get("name")
+                dev_user_id = dev_meta.get("user_id")
+                save_plug_hourly_energy(
+                    device_id, key, round(delta, 4), source="coreiot",
+                    name=dev_name, user_id=dev_user_id
+                )
 
                 if key in predicted_details_cache:
                     forecast_client.send_feedback(
@@ -380,6 +410,9 @@ def get_device_telemetry(device_id):
             # Polling interval is ~10 seconds in periodic_data_logger.
             # Energy per sample (kWh) = W * seconds / (1000 * 3600).
             estimated_kwh = max(0.0, power_w) * 10.0 / (1000.0 * 3600.0)
+            dev_meta = CUSTOM_CB_DEVICES.get(device_id, {})
+            dev_name = dev_meta.get("name")
+            dev_user_id = dev_meta.get("user_id")
             save_plug_hourly_energy(
                 device_id=device_id,
                 hour_bucket=hour_bucket,
@@ -390,6 +423,8 @@ def get_device_telemetry(device_id):
                 on_minutes=0,
                 samples_count=1,
                 source="derived",
+                name=dev_name,
+                user_id=dev_user_id,
             )
         except (TypeError, ValueError):
             pass

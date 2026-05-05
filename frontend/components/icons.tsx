@@ -13,6 +13,7 @@ import {
   Zap,
   Settings,
   Home,
+  LogOut,
   Calendar,
   Activity,
   AlertTriangle,
@@ -82,6 +83,7 @@ export const Icons = {
   trash: Trash2,
   chevronDown: ChevronDown,
   chevronRight: ChevronRight,
+  logout: LogOut,
 
   // Alerts
   warning: AlertTriangle,

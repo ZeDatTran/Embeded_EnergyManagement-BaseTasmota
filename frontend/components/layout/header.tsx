@@ -8,6 +8,9 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuTrigger,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -18,6 +21,7 @@ import {
 import { formatDate } from "@/lib/utils";
 import { cn } from "@/lib/utils";
 import { useSocket } from "@/context/SocketContext";
+import { useAuth } from "@/context/AuthContext";
 
 export function Header() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -25,6 +29,7 @@ export function Header() {
   const [logs, setLogs] = useState<ActivityLog[]>([]);
   const [activeTab, setActiveTab] = useState<"alerts" | "logs">("alerts");
   const { socket, isConnected } = useSocket();
+  const { user, logout } = useAuth();
 
   // Socket listeners
   useEffect(() => {
@@ -137,6 +142,30 @@ export function Header() {
 
         {/* Right side actions */}
         <div className="flex items-center gap-2">
+          {/* User Menu Dropdown */}
+          {user && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="icon" className="rounded-full bg-accent/50 mr-1 overflow-hidden border">
+                  <div className="flex h-full w-full items-center justify-center bg-blue-600 text-xs font-semibold text-white">
+                    {user.username.substring(0, 2).toUpperCase()}
+                  </div>
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-56">
+                <DropdownMenuLabel className="flex flex-col">
+                  <span className="font-semibold">{user.full_name || user.username}</span>
+                  <span className="text-xs font-normal text-muted-foreground">{user.email}</span>
+                </DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={logout} className="text-red-500 cursor-pointer focus:text-red-500 focus:bg-red-50">
+                  <Icons.logout className="mr-2 h-4 w-4" />
+                  <span>Đăng xuất</span>
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
+
           {/* Alerts & Logs Dropdown */}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
