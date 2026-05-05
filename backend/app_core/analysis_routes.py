@@ -54,7 +54,7 @@ def register_analysis_routes(app):
             lookback_days = int(request.args.get("lookbackDays", 14) or 14)
             min_active_power_w = float(request.args.get("minActivePowerW", 7) or 7)
             top_hours = int(request.args.get("topHours", 4) or 4)
-            buffer_hours = int(request.args.get("bufferHours", 2) or 2)
+            buffer_hours = int(request.args.get("bufferHours", 0) or 0)
 
             if lookback_days < 1 or lookback_days > 90:
                 return jsonify({"status": "error", "message": "lookbackDays must be between 1 and 90"}), 400

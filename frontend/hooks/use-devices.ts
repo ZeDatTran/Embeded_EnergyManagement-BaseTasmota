@@ -32,7 +32,7 @@ export function useDevices() {
         const metadata = (device as any).metadata || {}
         const deviceName = metadata.name || device.name || `CB ${index + 1}`
         const deviceLocation = metadata.location || device.location || "N/A"
-        
+
         return {
           id: device.id,
           type: metadata.type || device.type || "cb",
@@ -53,7 +53,10 @@ export function useDevices() {
         } as Device
       })
     },
-    refetchInterval: 5000, // Auto refetch every 5s for realtime
+    // Realtime updates are pushed via Socket.IO dashboard_update events.
+    // Use staleTime so the initial fetch is cached; no aggressive polling needed.
+    staleTime: 10_000,
+    refetchOnWindowFocus: false,
   })
 }
 
@@ -63,12 +66,12 @@ export function useDevice(deviceId: string) {
     queryFn: async () => {
       const device = await fetchDeviceById(deviceId)
       if (!device) return null
-      
+
       // Lấy metadata nếu có (từ backend mới)
       const metadata = (device as any).metadata || {}
       const deviceName = metadata.name || device.name || device.type || "CB"
       const deviceLocation = metadata.location || device.location || "N/A"
-      
+
       return {
         ...device,
         name: deviceName,
@@ -84,7 +87,9 @@ export function useDevice(deviceId: string) {
       } as Device
     },
     enabled: !!deviceId,
-    refetchInterval: 3000, // Refetch every 3 seconds for real-time updates
+    // Realtime updates pushed via Socket.IO; no polling needed.
+    staleTime: 10_000,
+    refetchOnWindowFocus: false,
   })
 }
 

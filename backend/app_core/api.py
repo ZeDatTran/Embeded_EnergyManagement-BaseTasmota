@@ -16,7 +16,7 @@ from app_core.auth_routes import _get_current_user
 
 
 def calculate_vietnam_electricity_bill(total_kwh):
-    """Vietnam household electricity tiered pricing + 8% VAT"""
+    
     tiers = [
         (100, 1984),   # Bậc 1: 0-50kWh → 1,984đ
         (100, 2050),   # Bậc 2: 50-100 → 2,050đ  
@@ -504,15 +504,7 @@ def register_routes(app, socketio):
             return history
 
         def _derive_energy_from_total(history_points, bucket_period: str) -> dict[str, float]:
-            """Derive per-bucket kWh from ENERGY-Total deltas with reset-safe handling.
-            
-            Handles:
-            - Counter reset (negative delta)
-            - Time gaps (>30min = new period, delta=0)  
-            - Duplicate register values (tiny delta over large gap = skip)
-            - Cross-day boundary (new day = reset)
-            - Repeated same delta value in same day (register stuck = skip repeats)
-            """
+           
             parsed = []
             for point in history_points:
                 try:
@@ -588,13 +580,7 @@ def register_routes(app, socketio):
             return result
 
         def _derive_energy_profile_from_total(history_points) -> dict[str, float]:
-            """Build per-point daily cumulative energy profile from ENERGY-Total.
-
-            For each day:
-            - baseline starts at first ENERGY-Total point of that day
-            - energy = max(total - baseline, 0)
-            - if counter resets (total < previous total), reset baseline at that point
-            """
+           
             parsed = []
             for point in history_points:
                 try:
@@ -645,15 +631,7 @@ def register_routes(app, socketio):
             return response.json()
 
         def _fetch_energy_deltas_by_bucket(start_ts: int, end_ts: int, bucket_period: str) -> dict[str, float]:
-            """Build energy (kWh) by hour/day from ENERGY-Total deltas with reset-safe logic.
             
-            Handles:
-            - Counter reset (negative delta)
-            - Time gaps (no data for >30min → new period, delta=0)
-            - Duplicate register values (tiny delta over large gap → skip)
-            - Cross-day boundary (new day → reset accumulation)
-            - Repeated same value in same day (register stuck)
-            """
             url = f"{shared.CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/values/timeseries"
             params = {
                 "keys": "ENERGY-Total",
@@ -1319,7 +1297,7 @@ def register_routes(app, socketio):
             max_devices = int(payload.get("maxDevices", 8) or 8)
             min_samples = int(payload.get("minSamples", 12) or 12)
             auto_apply = bool(payload.get("autoApply", True))
-            buffer_hours = int(payload.get("bufferHours", 2) or 2)
+            buffer_hours = int(payload.get("bufferHours", 0) or 0)
             target_device_ids = payload.get("deviceIds")
 
             if lookback_days < 1 or lookback_days > 90:
@@ -1335,58 +1313,51 @@ def register_routes(app, socketio):
             end_ts = int(now.replace(minute=0, second=0, microsecond=0).timestamp() * 1000)
 
             def _fetch_coreiot_hourly_points(device_id: str) -> list[dict]:
-                """Read hourly history + latest power point directly from CoreIoT."""
+
                 url = f"{shared.CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/values/timeseries"
                 params = {
-                    "keys": "ENERGY-Power",
+                    "keys": "ENERGY-Total",
                     "startTs": start_ts,
                     "endTs": end_ts,
-                    "limit": min(10000, lookback_days * 24 + 48),
-                    "agg": "AVG",
-                    "interval": 3600000,
+                    "limit": 50000,
+                    "orderBy": "ASC",
                 }
+                resp = requests.get(url, headers=shared.HEADERS, params=params, timeout=25)
+                resp.raise_for_status()
+                raw = resp.json()
 
-                history_points: dict[str, dict] = {}
-                history_resp = requests.get(url, headers=shared.HEADERS, params=params, timeout=25)
-                history_resp.raise_for_status()
-                history_payload = history_resp.json()
+                entries = raw.get("ENERGY-Total", [])
+                if not entries:
+                    return []
 
-                for entry in history_payload.get("ENERGY-Power", []):
-                    ts = entry.get("ts")
-                    if ts is None:
-                        continue
+                # Parse and ensure ascending order
+                parsed = []
+                for e in entries:
                     try:
-                        power_w = float(entry.get("value") or 0.0)
-                    except (TypeError, ValueError):
+                        ts_ms = int(e["ts"])
+                        val = float(e.get("value") or 0.0)
+                        parsed.append((ts_ms, max(0.0, val)))
+                    except (TypeError, ValueError, KeyError):
                         continue
+                parsed.sort(key=lambda x: x[0])
 
-                    hour_dt = datetime.fromtimestamp(ts / 1000).replace(minute=0, second=0, microsecond=0)
-                    hour_key = hour_dt.strftime("%Y-%m-%dT%H:00:00")
-                    history_points[hour_key] = {
-                        "hour": hour_dt,
-                        "energy_kwh": max(0.0, power_w) / 1000.0,
-                    }
+                if len(parsed) < 2:
+                    return []
 
-                latest_params = {"keys": "ENERGY-Power", "limit": 1, "orderBy": "DESC"}
-                latest_resp = requests.get(url, headers=shared.HEADERS, params=latest_params, timeout=15)
-                latest_resp.raise_for_status()
-                latest_payload = latest_resp.json()
-                latest_entries = latest_payload.get("ENERGY-Power", [])
-                if latest_entries:
-                    latest_entry = latest_entries[0]
-                    try:
-                        latest_ts = int(latest_entry.get("ts"))
-                        latest_power_w = float(latest_entry.get("value") or 0.0)
-                        latest_dt = datetime.fromtimestamp(latest_ts / 1000).replace(minute=0, second=0, microsecond=0)
-                        latest_key = latest_dt.strftime("%Y-%m-%dT%H:00:00")
-                        history_points[latest_key] = {
-                            "hour": latest_dt,
-                            "energy_kwh": max(0.0, latest_power_w) / 1000.0,
-                        }
-                    except (TypeError, ValueError):
-                        pass
+                # Accumulate delta kWh into hour buckets
+                hourly_kwh: dict = {}
+                prev_ts_ms, prev_total = parsed[0]
+                for ts_ms, total_kwh in parsed[1:]:
+                    delta = total_kwh - prev_total
+                    if delta > 0:
+                        dt = datetime.fromtimestamp(ts_ms / 1000).replace(
+                            minute=0, second=0, microsecond=0
+                        )
+                        hourly_kwh[dt] = hourly_kwh.get(dt, 0.0) + delta
+                    # Always update baseline (handles counter resets correctly)
+                    prev_ts_ms, prev_total = ts_ms, total_kwh
 
-                return list(history_points.values())
+                return [{"hour": dt, "energy_kwh": kwh} for dt, kwh in hourly_kwh.items()]
 
             tracked_device_ids = shared.get_tracked_device_ids() or shared.get_devices_from_group()
             if isinstance(target_device_ids, list) and target_device_ids:
@@ -1433,14 +1404,16 @@ def register_routes(app, socketio):
                 if not hourly_energy:
                     continue
 
-                # Select active hours by usage intensity and derive the main continuous window.
+                # Usage pattern analysis 
+                # Active hours: above 40% of the highest-energy hour
                 max_hour_energy = max(hourly_energy.values())
                 threshold = max_hour_energy * 0.4
                 active_hours = sorted([h for h, e in hourly_energy.items() if e >= threshold])
                 if not active_hours:
                     continue
 
-                segments = []
+                # Group into contiguous segments
+                segments: list[list[int]] = []
                 current_segment = [active_hours[0]]
                 for h in active_hours[1:]:
                     if h == current_segment[-1] + 1:
@@ -1450,19 +1423,33 @@ def register_routes(app, socketio):
                         current_segment = [h]
                 segments.append(current_segment)
 
-                best_segment = max(
+                # Rank segments by total energy consumed
+                segments_ranked = sorted(
                     segments,
-                    key=lambda seg: sum(hourly_energy.get(hour, 0.0) for hour in seg),
+                    key=lambda seg: sum(hourly_energy.get(hh, 0.0) for hh in seg),
+                    reverse=True,
                 )
-                on_hour = (best_segment[0] - buffer_hours) % 24
-                off_hour = (best_segment[-1] + 1 + buffer_hours) % 24
+                best_energy = sum(hourly_energy.get(hh, 0.0) for hh in segments_ranked[0])
 
-                on_time = f"{on_hour:02d}:00"
-                off_time = f"{off_hour:02d}:00"
+                # Accept a 2nd peak only if it has >= 30% of the primary peak's energy
+                top_segments = [segments_ranked[0]]
+                if len(segments_ranked) > 1:
+                    second_energy = sum(hourly_energy.get(hh, 0.0) for hh in segments_ranked[1])
+                    if second_energy >= best_energy * 0.30:
+                        top_segments.append(segments_ranked[1])
 
-                weekday_counts = list(weekday_hits.values())
-                median_hits = statistics.median(weekday_counts) if weekday_counts else 0
-                days = [d for d in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] if weekday_hits[d] >= median_hits and weekday_hits[d] > 0]
+                # Display in chronological order
+                top_segments.sort(key=lambda seg: seg[0])
+
+                # Day selection: ratio-based (active >= 30% of possible occurrences) 
+                max_occ_per_day = max(1, (lookback_days + 6) // 7)
+                days = [
+                    d for d in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+                    if weekday_hits[d] / max_occ_per_day >= 0.30
+                ]
+                if not days:
+                    # Fallback: any day with at least 1 data point
+                    days = [d for d in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] if weekday_hits[d] > 0]
                 if not days:
                     days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
@@ -1474,40 +1461,50 @@ def register_routes(app, socketio):
                 )
                 device_name = metadata.get("name") or f"Device {device_id[-6:]}"
 
-                on_name = f"Auto ON {device_name}"
-                off_name = f"Auto OFF {device_name}"
+                #  Build peaks list (one entry per usage window) 
+                peaks_list = []
+                for i, seg in enumerate(top_segments):
+                    on_hour = (seg[0] - buffer_hours) % 24
+                    off_hour = (seg[-1] + 1 + buffer_hours) % 24
+                    on_time = f"{on_hour:02d}:00"
+                    off_time = f"{off_hour:02d}:00"
+                    suffix = f" P{i + 1}" if len(top_segments) > 1 else ""
+                    seg_kwh = round(sum(hourly_energy.get(hh, 0.0) for hh in seg), 4)
+                    peaks_list.append({
+                        "onSchedule": {
+                            "name": f"Auto ON {device_name}{suffix}",
+                            "targetId": device_id,
+                            "action": "on",
+                            "time": on_time,
+                            "days": days,
+                            "enabled": True,
+                        },
+                        "offSchedule": {
+                            "name": f"Auto OFF {device_name}{suffix}",
+                            "targetId": device_id,
+                            "action": "off",
+                            "time": off_time,
+                            "days": days,
+                            "enabled": True,
+                        },
+                        "analysis": {
+                            "peakWindow": [seg[0], seg[-1]],
+                            "bufferHours": buffer_hours,
+                            "extendedWindow": [on_hour, (off_hour - 1) % 24],
+                            "totalKwhInWindow": seg_kwh,
+                        },
+                    })
 
                 suggestion = {
                     "deviceId": device_id,
                     "deviceName": device_name,
                     "days": days,
-                    "onSchedule": {
-                        "name": on_name,
-                        "targetId": device_id,
-                        "action": "on",
-                        "time": on_time,
-                        "days": days,
-                        "enabled": True,
-                    },
-                    "offSchedule": {
-                        "name": off_name,
-                        "targetId": device_id,
-                        "action": "off",
-                        "time": off_time,
-                        "days": days,
-                        "enabled": True,
-                    },
+                    "peaks": peaks_list,
                     "analysis": {
                         "samples": len(device_points),
                         "activeHours": active_hours,
-                        "peakWindow": [best_segment[0], best_segment[-1]],
-                        "bufferHours": buffer_hours,
-                        "extendedWindow": [on_hour, (off_hour - 1) % 24],
-                        "dataSource": "coreiot_direct",
-                        "totalKwhInWindow": round(
-                            sum(hourly_energy.get(hour, 0.0) for hour in best_segment),
-                            4,
-                        ),
+                        "dataSource": "energy_total_delta",
+                        "lookbackDays": lookback_days,
                     },
                 }
                 suggestions.append(suggestion)
@@ -1524,16 +1521,17 @@ def register_routes(app, socketio):
                         for sch in existing_schedules
                     }
 
-                    for schedule_payload in (suggestion["onSchedule"], suggestion["offSchedule"]):
-                        dedupe_key = (
-                            schedule_payload["targetId"],
-                            schedule_payload["action"],
-                            schedule_payload["time"],
-                            ",".join(sorted(schedule_payload["days"])),
-                            True,
-                        )
-                        if dedupe_key in existing_keys:
-                            continue
+                    for peak in peaks_list:
+                        for schedule_payload in (peak["onSchedule"], peak["offSchedule"]):
+                            dedupe_key = (
+                                schedule_payload["targetId"],
+                                schedule_payload["action"],
+                                schedule_payload["time"],
+                                ",".join(sorted(schedule_payload["days"])),
+                                True,
+                            )
+                            if dedupe_key in existing_keys:
+                                continue
 
                         created = shared.create_schedule(
                             name=schedule_payload["name"],
@@ -2155,42 +2153,68 @@ def register_routes(app, socketio):
                 interval_ms = 86400000  # 1 day
                 is_hourly = False
 
-            # Aggregate power data across devices from CoreIoT, then convert to kWh.
+            # Use ENERGY-Total delta approach for accurate consumption measurement.
+            # ENERGY-Power with agg=AVG is count-based (not time-weighted), so when a device
+            # sends many samples while ON and few samples while OFF, the average is inflated,
+            # causing kWh to be 2-3x higher than reality.
+            # ENERGY-Total is a cumulative counter: delta between readings = actual kWh consumed.
             totals_by_interval_ts: dict[int, float] = {}
             for device_id in device_ids:
                 try:
                     url = f"{shared.CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/values/timeseries"
                     params = {
-                        "keys": "ENERGY-Power",
+                        "keys": "ENERGY-Total",
                         "startTs": start_ts,
                         "endTs": end_ts,
-                        "limit": 10000,
-                        "agg": "AVG",
-                        "interval": interval_ms,
+                        "limit": 50000,  # raw data - no aggregation
+                        "orderBy": "ASC",
                     }
                     resp = requests.get(url, headers=shared.HEADERS, params=params, timeout=20)
                     resp.raise_for_status()
                     raw = resp.json()
 
-                    for entry in raw.get("ENERGY-Power", []):
-                        ts = entry.get("ts")
-                        if ts is None:
-                            continue
+                    entries = raw.get("ENERGY-Total", [])
+                    if not entries:
+                        continue
+
+                    # Parse all entries, sort ascending by timestamp
+                    parsed = []
+                    for entry in entries:
                         try:
-                            power_w = float(entry.get("value") or 0.0)
+                            ts_ms = int(entry.get("ts"))
+                            val = float(entry.get("value") or 0.0)
+                            parsed.append((ts_ms, max(0.0, val)))
                         except (TypeError, ValueError):
                             continue
-                        # For hourly: group by hour; for daily: group by day
+
+                    if len(parsed) < 2:
+                        continue
+
+                    parsed.sort(key=lambda x: x[0])
+
+                    prev_ts_ms, prev_total = parsed[0]
+                    for ts_ms, total_kwh in parsed[1:]:
+                        delta = total_kwh - prev_total
+
+                        if delta < 0:
+                            # Counter reset: update baseline but don't count this delta
+                            prev_ts_ms, prev_total = ts_ms, total_kwh
+                            continue
+
+                        if delta == 0:
+                            prev_ts_ms, prev_total = ts_ms, total_kwh
+                            continue
+
+                        # Attribute delta to the interval bucket of the CURRENT reading
+                        dt = datetime.fromtimestamp(ts_ms / 1000)
                         if is_hourly:
-                            dt_interval = datetime.fromtimestamp(ts / 1000).replace(minute=0, second=0, microsecond=0)
+                            dt_interval = dt.replace(minute=0, second=0, microsecond=0)
                         else:
-                            dt_interval = datetime.fromtimestamp(ts / 1000).replace(hour=0, minute=0, second=0, microsecond=0)
+                            dt_interval = dt.replace(hour=0, minute=0, second=0, microsecond=0)
                         interval_ts = int(dt_interval.timestamp() * 1000)
-                        # Average power over interval (in watts); for daily interval, CoreIoT returns daily average
-                        # Convert: power_w × interval_hours / 1000 = kWh
-                        interval_hours = (interval_ms / 3600000)
-                        kwh_interval = (power_w * interval_hours) / 1000.0
-                        totals_by_interval_ts[interval_ts] = totals_by_interval_ts.get(interval_ts, 0.0) + max(0.0, kwh_interval)
+                        totals_by_interval_ts[interval_ts] = totals_by_interval_ts.get(interval_ts, 0.0) + delta
+
+                        prev_ts_ms, prev_total = ts_ms, total_kwh
                 except Exception as e:
                     logging.warning("Energy aggregation skipped device %s due to error: %s", device_id, e)
 
@@ -2295,7 +2319,7 @@ def register_routes(app, socketio):
             total_kwh = 0.0
 
             if period == "day":
-                # For 'day': Calculate from hourly power data (ENERGY-Power) to be consistent with chart
+                # For 'day': Use ENERGY-Total delta (same approach as chart) to be consistent.
                 now = datetime.now()
                 start_of_today = now.replace(hour=0, minute=0, second=0, microsecond=0)
                 start_ts = int(start_of_today.timestamp() * 1000)
@@ -2305,25 +2329,40 @@ def register_routes(app, socketio):
                     try:
                         url = f"{shared.CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/values/timeseries"
                         params = {
-                            "keys": "ENERGY-Power",
+                            "keys": "ENERGY-Total",
                             "startTs": start_ts,
                             "endTs": end_ts,
-                            "limit": 10000,
-                            "agg": "AVG",
-                            "interval": 3600000,  # hourly
+                            "limit": 50000,
+                            "orderBy": "ASC",
                         }
                         resp = requests.get(url, headers=shared.HEADERS, params=params, timeout=20)
                         resp.raise_for_status()
                         raw = resp.json()
 
-                        for entry in raw.get("ENERGY-Power", []):
+                        entries = raw.get("ENERGY-Total", [])
+                        if not entries:
+                            continue
+
+                        parsed = []
+                        for entry in entries:
                             try:
-                                power_w = float(entry.get("value") or 0.0)
-                                # Convert: power [W] × 1 hour / 1000 = kWh
-                                kwh_hour = max(0.0, power_w) / 1000.0
-                                total_kwh += kwh_hour
+                                ts_ms = int(entry.get("ts"))
+                                val = float(entry.get("value") or 0.0)
+                                parsed.append((ts_ms, max(0.0, val)))
                             except (TypeError, ValueError):
                                 continue
+
+                        if len(parsed) < 2:
+                            continue
+
+                        parsed.sort(key=lambda x: x[0])
+                        prev_total = parsed[0][1]
+                        for _, cur_total in parsed[1:]:
+                            delta = cur_total - prev_total
+                            if delta > 0:
+                                total_kwh += delta
+                            # Always update baseline (handles resets)
+                            prev_total = cur_total
                     except Exception as e:
                         logging.warning("Energy summary (day) skipped device %s due to error: %s", device_id, e)
 

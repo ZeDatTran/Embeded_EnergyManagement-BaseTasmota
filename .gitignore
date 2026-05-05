@@ -85,6 +85,9 @@ __pycache__/
 dist/
 build/
 
+# Debug & test scripts (local only, không push lên git)
+backend/scripts/debug/
+
 # ============================================================
 # TypeScript
 # ============================================================

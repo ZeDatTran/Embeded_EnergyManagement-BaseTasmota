@@ -7,7 +7,11 @@ from flask_socketio import SocketIO
 
 from app_core import shared
 from app_core.api import register_routes
+
 from app_core.auth_routes import register_auth_routes
+
+from app_core.chatbot_api import chatbot_bp
+
 from app_core.socket_events import register_socket_handlers
 from app_core.workers import periodic_data_logger, schedule_executor, start_websocket
 
@@ -15,9 +19,14 @@ from app_core.workers import periodic_data_logger, schedule_executor, start_webs
 app = Flask(__name__)
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+shared.socketio_instance = socketio  # expose to chatbot_api for state-sync broadcasts
 
 register_routes(app, socketio)
+
 register_auth_routes(app)
+
+app.register_blueprint(chatbot_bp)
+
 register_socket_handlers(socketio)
 
 
