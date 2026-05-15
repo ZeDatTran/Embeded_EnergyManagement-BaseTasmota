@@ -14,6 +14,7 @@ from database import (
     find_user_by_email,
     find_user_by_username,
     find_user_by_id,
+    update_user,
     update_last_login,
 )
 
@@ -63,6 +64,9 @@ def _sanitise_user(user: dict) -> dict:
     """Return user dict without sensitive fields."""
     safe = dict(user)
     safe.pop("password_hash", None)
+    # Expose group_id at top level for convenience
+    coreiot = safe.get("coreiot_config") or {}
+    safe["group_id"] = coreiot.get("group_id") or None
     return safe
 
 
@@ -166,5 +170,34 @@ def register_auth_routes(app):
             return err
         return jsonify({
             "status": "success",
+            "user": _sanitise_user(user),
+        })
+
+    # ── PATCH /api/auth/me ────────────────────────────────────────────
+    @app.route("/api/auth/me", methods=["PATCH"])
+    def auth_update_me():
+        """Update current user profile fields (group_id, settings, etc.)."""
+        user, err = _get_current_user()
+        if err:
+            return err
+
+        data = request.get_json(silent=True) or {}
+
+        # Update group_id inside coreiot_config
+        if "group_id" in data:
+            group_id = (data["group_id"] or "").strip() or None
+            current_config = user.get("coreiot_config") or {}
+            current_config["group_id"] = group_id
+            user = update_user(user["id"], coreiot_config=current_config)
+
+        # Update other allowed top-level fields
+        updatable = {k: v for k in ("full_name", "avatar_url", "settings") if (v := data.get(k)) is not None}
+        if updatable:
+            user = update_user(user["id"], **updatable)
+
+        logging.info("User %s updated profile", user["username"])
+        return jsonify({
+            "status": "success",
+            "message": "Cập nhật thành công",
             "user": _sanitise_user(user),
         })

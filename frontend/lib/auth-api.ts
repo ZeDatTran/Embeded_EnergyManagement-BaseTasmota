@@ -9,6 +9,7 @@ export interface AuthUser {
   role: string;
   is_active: boolean;
   avatar_url: string | null;
+  group_id: string | null;
   settings: {
     language: string;
     theme: string;
@@ -82,4 +83,24 @@ export async function fetchCurrentUser(
   } catch {
     return null;
   }
+}
+
+/**
+ * Update current user profile (group_id, settings, etc.).
+ */
+export async function updateProfile(
+  token: string,
+  data: { group_id?: string | null; full_name?: string; settings?: object }
+): Promise<AuthUser> {
+  const res = await fetch(`${API_BASE_URL}/api/auth/me`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(data),
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.message || "Cập nhật thất bại");
+  return json.user;
 }

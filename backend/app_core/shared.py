@@ -38,13 +38,11 @@ load_dotenv()
 
 CORE_IOT_URL = "https://app.coreiot.io"
 JWT_TOKEN = os.getenv("JWT_TOKEN")
-DEVICE_ID = os.getenv("DEVICE_ID")
-GROUP_ID = os.getenv("GROUP_ID")
-ML_ANALYSIS_DEVICE_ID = os.getenv("ML_ANALYSIS_DEVICE_ID") or DEVICE_ID
+GROUP_ID = os.getenv("GROUP_ID")  # Optional global fallback — each user has their own group_id in DB
 HEADERS = {"Authorization": f"Bearer {JWT_TOKEN}"}
 
-if not all([JWT_TOKEN, DEVICE_ID, GROUP_ID]):
-    raise ValueError("JWT_TOKEN, DEVICE_ID and GROUP_ID must be set in .env file")
+if not JWT_TOKEN:
+    raise ValueError("JWT_TOKEN must be set in .env file")
 
 log_dir = "logs"
 os.makedirs(log_dir, exist_ok=True)
@@ -120,6 +118,27 @@ def get_tracked_device_ids(user_id: int = None) -> list[str]:
     if user_id is not None:
         return [dev_id for dev_id, meta in CUSTOM_CB_DEVICES.items() if meta.get("user_id") == user_id]
     return list(CUSTOM_CB_DEVICES.keys())
+
+
+def get_user_devices(user_id: str) -> list[str]:
+    """Return device IDs for a specific user — THE single function all API routes should call.
+
+    Priority:
+    1. Devices registered by this user in CUSTOM_CB_DEVICES (MongoDB-backed, fast).
+    2. If none, fetch live from CoreIoT using the user's own group_id from DB.
+
+    This ensures each user only sees devices from THEIR group_id, never another user's.
+    """
+    tracked = get_tracked_device_ids(user_id)
+    if tracked:
+        return tracked
+
+    user_group_id = get_user_group_id(user_id)
+    if user_group_id:
+        return get_devices_from_group(user_group_id)
+
+    logging.warning("get_user_devices(%s): no devices found (no registered devices, no group_id set)", user_id)
+    return []
 
 if FORECAST_ENABLED:
     previous_energy = {}
@@ -328,15 +347,29 @@ def verify_token():
         return False
 
 
-def get_devices_from_group():
-    """Get all DEVICE ids from configured entity group only (no tenant fallback)."""
-    if not GROUP_ID:
-        logging.error("GROUP_ID is missing. Refusing tenant-wide device fetch.")
+def get_user_group_id(user_id: str) -> str | None:
+    """Fetch the group_id stored in the user's coreiot_config from MongoDB."""
+    try:
+        from db_users import find_user_by_id
+        user = find_user_by_id(user_id)
+        if user:
+            return (user.get("coreiot_config") or {}).get("group_id") or None
+    except Exception as e:
+        logging.warning("get_user_group_id(%s) failed: %s", user_id, e)
+    return None
+
+
+def get_devices_from_group(group_id: str | None = None) -> list[str]:
+    """Get all DEVICE ids from a CoreIoT entity group.
+    Uses the provided group_id, falls back to the global GROUP_ID from .env.
+    """
+    target_group = group_id or GROUP_ID
+    if not target_group:
+        logging.warning("No group_id provided and GROUP_ID not set in .env. Cannot fetch devices.")
         return []
 
     try:
-        # CoreIoT/ThingsBoard entity-group endpoint gives strict group membership.
-        url = f"{CORE_IOT_URL}/api/entityGroup/{GROUP_ID}/entities?pageSize=100&page=0&entityType=DEVICE"
+        url = f"{CORE_IOT_URL}/api/entityGroup/{target_group}/entities?pageSize=100&page=0&entityType=DEVICE"
         response = requests.get(url, headers=HEADERS, timeout=15)
         response.raise_for_status()
         payload = response.json()
@@ -352,7 +385,6 @@ def get_devices_from_group():
         for entity in entities:
             if not isinstance(entity, dict):
                 continue
-            # Common shapes: {id:{id,entityType}}, or {entityId:{id,...}}, or direct id
             if isinstance(entity.get("id"), dict):
                 dev_id = entity["id"].get("id")
             elif isinstance(entity.get("entityId"), dict):
@@ -364,14 +396,14 @@ def get_devices_from_group():
                 device_ids.append(dev_id)
 
         if not device_ids:
-            logging.warning("No devices found in group %s.", GROUP_ID)
+            logging.warning("No devices found in group %s.", target_group)
             return []
 
-        logging.info("Found %s devices in group %s", len(device_ids), GROUP_ID)
+        logging.info("Found %s devices in group %s", len(device_ids), target_group)
         return device_ids
 
     except requests.RequestException as e:
-        logging.error("Error fetching devices from group %s: %s", GROUP_ID, e)
+        logging.error("Error fetching devices from group %s: %s", target_group, e)
         return []
 
 
@@ -575,10 +607,12 @@ def get_plug_hourly_history_for_forecast(device_id: str, start_of_month: datetim
     return history_dict
 
 
-def get_all_plugs_for_forecast() -> list[dict]:
+def get_all_plugs_for_forecast(user_id: str = None) -> list[dict]:
     """Return list of custom CB devices with their metadata for batch forecasting."""
     plugs = []
     for device_id, metadata in CUSTOM_CB_DEVICES.items():
+        if user_id and metadata.get("user_id") != user_id:
+            continue
         plugs.append({
             "device_id": device_id,
             "name": metadata.get("name", f"CB {device_id}"),

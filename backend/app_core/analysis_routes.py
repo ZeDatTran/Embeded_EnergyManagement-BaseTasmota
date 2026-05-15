@@ -5,6 +5,7 @@ import requests
 from flask import jsonify, request
 
 from app_core import shared
+from app_core.auth_routes import _get_current_user
 
 
 def _merge_wrap_windows(windows: list[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -51,6 +52,10 @@ def register_analysis_routes(app):
     def analyze_plug_activity_windows():
         """Analyze active time windows for each plug directly from CoreIoT hourly power history."""
         try:
+            user, err = _get_current_user()
+            if err:
+                return err
+
             lookback_days = int(request.args.get("lookbackDays", 14) or 14)
             min_active_power_w = float(request.args.get("minActivePowerW", 7) or 7)
             top_hours = int(request.args.get("topHours", 4) or 4)
@@ -68,7 +73,7 @@ def register_analysis_routes(app):
             start_ts = int(start_dt.replace(minute=0, second=0, microsecond=0).timestamp() * 1000)
             end_ts = int(now.replace(minute=0, second=0, microsecond=0).timestamp() * 1000)
 
-            tracked_device_ids = shared.get_tracked_device_ids() or shared.get_devices_from_group()
+            tracked_device_ids = shared.get_user_devices(user["id"])
             if not tracked_device_ids:
                 return jsonify({"status": "empty", "message": "No plugs available for analysis", "data": []}), 200
 
@@ -248,6 +253,10 @@ def register_analysis_routes(app):
     def analyze_monthly_plug_activity():
         """Analyze plug activity within one month and return active hour windows by day."""
         try:
+            user, err = _get_current_user()
+            if err:
+                return err
+
             lookback_days = int(request.args.get("lookbackDays", 30) or 30)
             min_active_power_w = float(request.args.get("minActivePowerW", 10) or 10)
 
@@ -259,7 +268,7 @@ def register_analysis_routes(app):
             start_ts = int(start_dt.replace(minute=0, second=0, microsecond=0).timestamp() * 1000)
             end_ts = int(now.replace(minute=0, second=0, microsecond=0).timestamp() * 1000)
 
-            tracked_device_ids = shared.get_tracked_device_ids() or shared.get_devices_from_group()
+            tracked_device_ids = shared.get_user_devices(user["id"])
             if not tracked_device_ids:
                 return jsonify({"status": "empty", "message": "No plugs available", "data": []}), 200
 

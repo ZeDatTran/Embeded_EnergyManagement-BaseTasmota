@@ -73,6 +73,7 @@ SYSTEM_PROMPT = """Bạn là **Energy AI** — trợ lý thông minh tích hợp
 | "tháng này vs tháng trước" | `compare_energy(mode=month_vs_last_month)` |
 | "thiết bị nào dùng nhiều nhất / ít nhất" | `get_device_ranking` |
 | "so sánh các thiết bị" | `compare_energy(mode=between_devices)` |
+| "so sánh hôm nay với ngày 23/4", "ngày 15/4 vs 20/4" | `compare_energy(mode=custom_dates, date1="2026-04-15", date2="2026-04-20")` |
 | "so sánh từng thiết bị hôm nay vs hôm qua", "mỗi thiết bị dùng bao nhiêu hôm nay" | `compare_devices(mode=by_day)` |
 | "so sánh từng thiết bị tháng này vs tháng trước", "tháng này từng thiết bị" | `compare_devices(mode=by_month)` |
 | "xu hướng từng ngày", "7 ngày qua từng thiết bị", "mỗi ngày dùng bao nhiêu" | `compare_devices(mode=daily_trend, days=7)` |
@@ -186,21 +187,31 @@ def _build_tools() -> list:
                         "- 'cuối tuần' / 'thứ 7 chủ nhật' / '2 ngày cuối tuần này vs cuối tuần trước' → mode=weekend_comparison\n"
                         "- 'tháng này so tháng trước' / 'tháng này dùng nhiều hơn không' → mode=month_vs_last_month\n"
                         "- 'thiết bị nào dùng nhiều' / 'so sánh các thiết bị' → mode=between_devices\n"
-                        "Tool này CÓ KHẢ NĂNG lấy dữ liệu ngày hôm qua, 7 ngày trước, cuối tuần trước và tháng trước từ hệ thống."
+                        "- 'so sánh hôm nay với ngày 23/4', 'ngày 15/04 vs 20/04' → mode=custom_dates, date1='...', date2='...'\n"
+                        "Tool này CÓ KHẢ NĂNG lấy dữ liệu ngày hôm qua, 7 ngày trước, cuối tuần trước, tháng trước, và bất kỳ 2 ngày cụ thể nào từ hệ thống."
                     ),
                     parameters=genai_types.Schema(
                         type=genai_types.Type.OBJECT,
                         properties={
                             "mode": genai_types.Schema(
                                 type=genai_types.Type.STRING,
-                                enum=["day_vs_yesterday", "week_vs_last_week", "weekend_comparison", "month_vs_last_month", "between_devices"],
+                                enum=["day_vs_yesterday", "week_vs_last_week", "weekend_comparison", "month_vs_last_month", "between_devices", "custom_dates"],
                                 description=(
                                     "day_vs_yesterday: hôm nay vs hôm qua | "
                                     "week_vs_last_week: 7 ngày gần nhất vs 7 ngày trước đó (rolling) | "
                                     "weekend_comparison: Thứ 7+CN gần nhất vs Thứ 7+CN tuần trước | "
                                     "month_vs_last_month: tháng này vs tháng trước | "
-                                    "between_devices: so sánh giữa các thiết bị"
+                                    "between_devices: so sánh giữa các thiết bị | "
+                                    "custom_dates: so sánh giữa 2 ngày cụ thể, hoặc hôm nay với 1 ngày"
                                 ),
+                            ),
+                            "date1": genai_types.Schema(
+                                type=genai_types.Type.STRING,
+                                description="Ngày thứ nhất, định dạng YYYY-MM-DD. Mặc định là hôm nay nếu để trống hoặc 'today'."
+                            ),
+                            "date2": genai_types.Schema(
+                                type=genai_types.Type.STRING,
+                                description="Ngày thứ hai, định dạng YYYY-MM-DD."
                             ),
                         },
                         required=["mode"],
@@ -602,7 +613,7 @@ def _tool_get_device_telemetry(device_id: str, device_name: str = "") -> dict[st
     }
 
 
-def _tool_compare_energy(mode: str) -> dict[str, Any]:
+def _tool_compare_energy(mode: str, date1: str = "", date2: str = "") -> dict[str, Any]:
     s   = _shared()
     now = datetime.now()
     device_ids = list(s.CUSTOM_CB_DEVICES.keys()) or s.get_devices_from_group()
@@ -698,6 +709,55 @@ def _tool_compare_energy(mode: str) -> dict[str, Any]:
                 "last_saturday":  {"date": last_saturday.strftime("%d/%m/%Y"), "kwh": last_sat_kwh, "cost_vnd": _calculate_vietnam_electricity_bill(last_sat_kwh)},
                 "last_sunday":    {"date": last_sunday.strftime("%d/%m/%Y"),   "kwh": last_sun_kwh, "cost_vnd": _calculate_vietnam_electricity_bill(last_sun_kwh)},
             },
+        }
+
+    elif mode == "custom_dates":
+        def parse_date(d_str):
+            if not d_str or d_str.lower() == "today":
+                return now.date()
+            if d_str.lower() == "yesterday":
+                return (now - timedelta(days=1)).date()
+            for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+                try:
+                    return datetime.strptime(d_str, fmt).date()
+                except ValueError:
+                    continue
+            return None
+
+        d1 = parse_date(date1)
+        d2 = parse_date(date2)
+
+        if not d1 or not d2:
+            return {"error": f"Định dạng ngày không hợp lệ. Vui lòng dùng YYYY-MM-DD hoặc DD/MM/YYYY. (Nhận được date1='{date1}', date2='{date2}')"}
+            
+        if d1 > now.date() or d2 > now.date():
+            return {"error": "Không thể so sánh với ngày trong tương lai."}
+            
+        start1 = int(datetime(d1.year, d1.month, d1.day).timestamp() * 1000)
+        end1   = start1 + 86_400_000 - 1 if d1 != now.date() else int(now.timestamp() * 1000)
+
+        start2 = int(datetime(d2.year, d2.month, d2.day).timestamp() * 1000)
+        end2   = start2 + 86_400_000 - 1 if d2 != now.date() else int(now.timestamp() * 1000)
+
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            f1 = ex.submit(_parallel_kwh, device_ids, start1, end1)
+            f2 = ex.submit(_parallel_kwh, device_ids, start2, end2)
+            kwh1 = f1.result()
+            kwh2 = f2.result()
+            
+        change = pct(kwh1, kwh2)
+        label1 = "Hôm nay" if d1 == now.date() else f"Ngày {d1.strftime('%d/%m/%Y')}"
+        label2 = "Hôm nay" if d2 == now.date() else f"Ngày {d2.strftime('%d/%m/%Y')}"
+        return {
+            "mode": mode,
+            "current_period":   label1,
+            "previous_period":  label2,
+            "current_kwh":      kwh1,
+            "previous_kwh":     kwh2,
+            "current_cost_vnd": _calculate_vietnam_electricity_bill(kwh1),
+            "previous_cost_vnd":_calculate_vietnam_electricity_bill(kwh2),
+            "change_pct":       change,
+            "trend": "increase" if (change or 0) > 0 else "decrease" if (change or 0) < 0 else "stable",
         }
 
     elif mode == "day_vs_yesterday":
@@ -1244,7 +1304,11 @@ def _dispatch_tool(name: str, args: dict) -> str:
                 device_name=args.get("device_name", ""),
             )
         elif name == "compare_energy":
-            result = _tool_compare_energy(mode=args.get("mode", "day_vs_yesterday"))
+            result = _tool_compare_energy(
+                mode=args.get("mode", "day_vs_yesterday"),
+                date1=args.get("date1", ""),
+                date2=args.get("date2", "")
+            )
         elif name == "get_device_ranking":
             result = _tool_get_device_ranking(
                 period=args.get("period", "day"),
@@ -1296,13 +1360,38 @@ def _run_gemini_agent(user_message: str, history: list[dict]) -> tuple[str, list
         system_instruction=SYSTEM_PROMPT,
         tools=tools,
     )
-    chat = client.chats.create(model=GEMINI_MODEL, config=config, history=gemini_history)
 
-    try:
-        response = chat.send_message(user_message)
-    except Exception as exc:
-        logging.error("Gemini API error: %s", exc)
-        return f"Lỗi kết nối Gemini API: {exc}", history
+    fallback_models = [
+        GEMINI_MODEL,
+        "gemini-3.1-flash-lite",
+        "gemini-2.5-flash",
+        "gemini-2.0-flash-lite",
+        "gemini-2.0-flash"
+    ]
+    fallback_models = list(dict.fromkeys(fallback_models)) # Remove duplicates
+
+    response = None
+    send_exc = None
+    chat = None
+
+    for model_name in fallback_models:
+        try:
+            logging.info("Sử dụng model Gemini: %s", model_name)
+            chat = client.chats.create(model=model_name, config=config, history=gemini_history)
+            response = chat.send_message(user_message)
+            send_exc = None
+            break # Success
+        except Exception as exc:
+            send_exc = exc
+            err_str = str(exc).upper()
+            logging.warning("Lỗi Gemini API với model %s: %s", model_name, exc)
+            # Only switch model on overload or unavailable errors
+            if "503" not in err_str and "429" not in err_str and "UNAVAILABLE" not in err_str and "RESOURCE_EXHAUSTED" not in err_str:
+                break 
+
+    if send_exc is not None or response is None:
+        logging.error("Gemini API error exhausted all fallback models: %s", send_exc)
+        return f"Lỗi kết nối Gemini API (đã thử nhiều model): {send_exc}", history
 
     max_iterations = 5
     iteration = 0
@@ -1312,7 +1401,12 @@ def _run_gemini_agent(user_message: str, history: list[dict]) -> tuple[str, list
         tool_calls_found     = False
         tool_response_parts: list[genai_types.Part] = []
 
-        for part in response.candidates[0].content.parts:
+        if response and response.candidates and response.candidates[0].content:
+            parts = response.candidates[0].content.parts or []
+        else:
+            parts = []
+
+        for part in parts:
             fc = getattr(part, "function_call", None)
             if fc and fc.name:
                 tool_calls_found = True

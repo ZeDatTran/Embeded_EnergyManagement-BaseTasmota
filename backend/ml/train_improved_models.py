@@ -26,7 +26,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from database import get_all_history, list_plug_hourly_energy
+from database import get_all_history, list_plug_hourly_energy, list_users
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = ROOT_DIR / "data" / "power_history.db"
@@ -113,60 +113,76 @@ def fetch_coreiot_history_df(lookback_days: int = 60, chunk_days: int = 7) -> pd
         print("[WARN] JWT_TOKEN missing - using UCI fallback")
         return pd.DataFrame(columns=["kwh_hour"])
 
-    if not GROUP_ID:
-        print("[WARN] GROUP_ID missing - skip tenant-wide fetch and use fallback source")
+    # --- MULTI-TENANT FETCH ---
+    # Collect all unique group IDs from all registered users
+    all_group_ids = set()
+    if GROUP_ID:
+        all_group_ids.add(GROUP_ID)
+    
+    try:
+        users = list_users()
+        for user in users:
+            gid = (user.get("coreiot_config") or {}).get("group_id")
+            if gid:
+                all_group_ids.add(gid)
+    except Exception as e:
+        print(f"[WARN] Failed to list users for group discovery: {e}")
+
+    if not all_group_ids:
+        print("[INFO] No group IDs found (global or per-user). Relying on local DB history.")
         return pd.DataFrame(columns=["kwh_hour"])
 
-    try:
-        devices_url = f"{CORE_IOT_URL}/api/entityGroup/{GROUP_ID}/entities?pageSize=100&page=0&entityType=DEVICE"
-        devices_resp = requests.get(devices_url, headers=HEADERS, timeout=20)
-        devices_resp.raise_for_status()
-        payload = devices_resp.json()
-
-        if isinstance(payload, dict):
-            entities = payload.get("data", [])
-        elif isinstance(payload, list):
-            entities = payload
-        else:
+    print(f"[INFO] Scanning {len(all_group_ids)} user group(s) on CoreIoT...")
+    device_ids = set()
+    
+    for gid in all_group_ids:
+        try:
+            url = f"{CORE_IOT_URL}/api/entityGroup/{gid}/entities?pageSize=100&page=0&entityType=DEVICE"
+            resp = requests.get(url, headers=HEADERS, timeout=15)
+            resp.raise_for_status()
+            payload = resp.json()
+            
             entities = []
+            if isinstance(payload, dict): entities = payload.get("data", [])
+            elif isinstance(payload, list): entities = payload
+            
+            for ent in entities:
+                did = None
+                if isinstance(ent.get("id"), dict): did = ent["id"].get("id")
+                elif isinstance(ent.get("entityId"), dict): did = ent["entityId"].get("id")
+                else: did = ent.get("id")
+                if did: device_ids.add(did)
+        except Exception as e:
+            print(f"[WARN] Failed to fetch devices for group {gid}: {e}")
 
-        device_ids = []
-        for ent in entities:
-            if not isinstance(ent, dict):
-                continue
-            if isinstance(ent.get("id"), dict):
-                dev_id = ent["id"].get("id")
-            elif isinstance(ent.get("entityId"), dict):
-                dev_id = ent["entityId"].get("id")
-            else:
-                dev_id = ent.get("id")
-            if dev_id:
-                device_ids.append(dev_id)
+    if not device_ids:
+        print("[INFO] No devices found in any group. Relying on local DB history.")
+        return pd.DataFrame(columns=["kwh_hour"])
 
-        if not device_ids:
-            return pd.DataFrame(columns=["kwh_hour"])
+    print(f"[INFO] Found {len(device_ids)} total device(s) to scan.")
 
-        end_dt = datetime.now()
-        start_dt = end_dt - timedelta(days=max(1, lookback_days))
-        chunk_delta = timedelta(days=max(1, chunk_days))
-        power_by_hour: dict[str, float] = {}
+    end_dt = datetime.now()
+    start_dt = end_dt - timedelta(days=max(1, lookback_days))
+    chunk_delta = timedelta(days=max(1, chunk_days))
+    power_by_hour: dict[str, float] = {}
 
-        for device_id in device_ids:
-            cursor = start_dt
-            while cursor < end_dt:
-                chunk_end = min(cursor + chunk_delta, end_dt)
-                start_ts = int(cursor.timestamp() * 1000)
-                end_ts = int(chunk_end.timestamp() * 1000)
+    for device_id in device_ids:
+        cursor = start_dt
+        while cursor < end_dt:
+            chunk_end = min(cursor + chunk_delta, end_dt)
+            start_ts = int(cursor.timestamp() * 1000)
+            end_ts = int(chunk_end.timestamp() * 1000)
 
-                url = f"{CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/values/timeseries"
-                params = {
-                    "keys": "ENERGY-Power",
-                    "startTs": start_ts,
-                    "endTs": end_ts,
-                    "limit": 10000,
-                    "agg": "AVG",
-                    "interval": 3600000,
-                }
+            url = f"{CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/values/timeseries"
+            params = {
+                "keys": "ENERGY-Power",
+                "startTs": start_ts,
+                "endTs": end_ts,
+                "limit": 10000,
+                "agg": "AVG",
+                "interval": 3600000,
+            }
+            try:
                 resp = requests.get(url, headers=HEADERS, params=params, timeout=25)
                 resp.raise_for_status()
                 raw = resp.json()
@@ -182,24 +198,24 @@ def fetch_coreiot_history_df(lookback_days: int = 60, chunk_days: int = 7) -> pd
                         continue
                     hour_key = datetime.fromtimestamp(ts_ms / 1000).strftime("%Y-%m-%dT%H:00:00")
                     power_by_hour[hour_key] = power_by_hour.get(hour_key, 0.0) + max(0.0, power_w)
+            except Exception as e:
+                print(f"[WARN] Failed to fetch telemetry for device {device_id}: {e}")
 
-                cursor = chunk_end
+            cursor = chunk_end
 
-        if not power_by_hour:
-            return pd.DataFrame(columns=["kwh_hour"])
-
-        rows = []
-        for hour_key, total_power_w in power_by_hour.items():
-            rows.append({"datetime": hour_key, "kwh_hour": round(total_power_w / 1000.0, 6)})
-
-        df = pd.DataFrame(rows)
-        df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
-        df = df.dropna(subset=["datetime"]).set_index("datetime").sort_index()
-        return df
-
-    except Exception as e:
-        print(f"[WARN] CoreIoT fetch failed: {e}")
+    if not power_by_hour:
         return pd.DataFrame(columns=["kwh_hour"])
+
+    rows = []
+    for hour_key, total_power_w in power_by_hour.items():
+        rows.append({"datetime": hour_key, "kwh_hour": round(total_power_w / 1000.0, 6)})
+
+    df = pd.DataFrame(rows)
+    df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
+    df = df.dropna(subset=["datetime"]).set_index("datetime").sort_index()
+    return df
+
+
 
 
 def load_data_for_training():

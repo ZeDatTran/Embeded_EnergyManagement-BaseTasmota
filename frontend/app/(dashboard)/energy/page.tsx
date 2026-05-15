@@ -5,7 +5,6 @@ import { EnergyChart } from "@/components/energy/energy-chart"
 import { EnergyStats } from "@/components/energy/energy-stats"
 import { ThresholdAlert } from "@/components/energy/threshold-alert"
 import { AIPredictEnergy } from "@/components/energy/AI-predict-energy"
-import { PlugForecastRunner } from "@/components/energy/plug-forecast-runner"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { fetchEnergyData, fetchEnergySummary, type EnergyData, type EnergySummaryData } from "@/lib/api"
 import { useSocket } from "@/context/SocketContext"
@@ -167,9 +166,6 @@ export default function EnergyPage() {
       </div>
       {/* AI Forecast Component */}
       <AIPredictEnergy />
-
-      {/* Plug-by-Plug Forecast Component */}
-      <PlugForecastRunner />
     </div>
   )
 }

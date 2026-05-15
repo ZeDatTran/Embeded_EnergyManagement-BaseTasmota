@@ -74,6 +74,13 @@ from db_devices import (
 )
 
 
+# Forecast results (NEW - per user)
+from db_forecast import (
+    save_user_forecast,
+    get_user_forecast,
+)
+
+
 def init_db():
     """Initialize MongoDB indexes for all collections."""
     init_indexes()

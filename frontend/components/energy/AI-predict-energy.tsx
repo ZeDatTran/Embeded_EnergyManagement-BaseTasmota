@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react"
 import { Loader2, Zap } from "lucide-react"
+import { useAuth } from "@/context/AuthContext"
 
 // Định nghĩa kiểu dữ liệu trả về từ Server AI
 interface ForecastData {
@@ -19,12 +20,16 @@ export function AIPredictEnergy() {
     const [forecastData, setForecastData] = useState<ForecastData | null>(null)
     const [isForecasting, setIsForecasting] = useState(false)
     const [forecastStatus, setForecastStatus] = useState<string>("")
+    const { token } = useAuth()
 
     // Ưu tiên lấy dữ liệu mới nhất từ server; cache chỉ dùng làm fallback.
     useEffect(() => {
         const loadLatestSummary = async () => {
             try {
-                const resSummary = await fetch(`${AI_SERVER_URL}/forecast/summary`)
+                if (!token) return;
+                const resSummary = await fetch(`${AI_SERVER_URL}/forecast/summary`, {
+                    headers: { "Authorization": `Bearer ${token}` }
+                })
                 const dataSummary = await resSummary.json()
 
                 if (resSummary.ok && dataSummary.status === "success") {
@@ -49,7 +54,7 @@ export function AIPredictEnergy() {
         }
 
         loadLatestSummary()
-    }, [])
+    }, [token])
 
     const handleRunForecast = async () => {
         setIsForecasting(true)
@@ -62,6 +67,7 @@ export function AIPredictEnergy() {
 
             const res = await fetch(`${AI_SERVER_URL}/forecast`, {
                 method: "GET",
+                headers: { "Authorization": `Bearer ${token}` },
                 signal: controller.signal,
             })
 
@@ -76,7 +82,9 @@ export function AIPredictEnergy() {
 
             if (res.ok) {
                 // Lấy lại summary chuẩn
-                const resSummary = await fetch(`${AI_SERVER_URL}/forecast/summary`)
+                const resSummary = await fetch(`${AI_SERVER_URL}/forecast/summary`, {
+                    headers: { "Authorization": `Bearer ${token}` }
+                })
                 const dataSummary = await resSummary.json()
 
                 if (dataSummary.status === "success") {

@@ -13,8 +13,10 @@ import {
   loginUser,
   registerUser,
   fetchCurrentUser,
+  updateProfile,
   type AuthUser,
 } from "@/lib/auth-api";
+import { GroupSetupModal } from "@/components/group-setup-modal";
 
 const TOKEN_KEY = "smart_home_token";
 
@@ -31,6 +33,8 @@ interface AuthContextValue {
     full_name?: string;
   }) => Promise<void>;
   logout: () => void;
+  updateGroupId: (groupId: string) => Promise<void>;
+  openGroupSetup: () => void;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
@@ -41,6 +45,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [showGroupSetup, setShowGroupSetup] = useState(false);
   const router = useRouter();
   const pathname = usePathname();
 
@@ -54,7 +59,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           if (u) {
             setUser(u);
           } else {
-            // Token invalid — clear it
             localStorage.removeItem(TOKEN_KEY);
             setToken(null);
           }
@@ -64,6 +68,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setIsLoading(false);
     }
   }, []);
+
+  // Show group setup popup when user is authenticated but has no group_id
+  useEffect(() => {
+    if (!user) return;
+    const isPublic = PUBLIC_PATHS.some((p) => pathname.startsWith(p));
+    if (!isPublic && !user.group_id) {
+      setShowGroupSetup(true);
+    } else {
+      setShowGroupSetup(false);
+    }
+  }, [user, pathname]);
 
   // Redirect logic
   useEffect(() => {
@@ -112,8 +127,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     localStorage.removeItem(TOKEN_KEY);
     setToken(null);
     setUser(null);
+    setShowGroupSetup(false);
     router.replace("/login");
   }, [router]);
+
+  const updateGroupId = useCallback(
+    async (groupId: string) => {
+      if (!token) throw new Error("Chưa đăng nhập");
+      const updated = await updateProfile(token, { group_id: groupId });
+      setUser(updated);
+      setShowGroupSetup(false);
+    },
+    [token]
+  );
 
   return (
     <AuthContext.Provider
@@ -125,9 +151,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         login,
         register,
         logout,
+        updateGroupId,
+        openGroupSetup: () => setShowGroupSetup(true),
       }}
     >
       {children}
+      {showGroupSetup && (
+        <GroupSetupModal
+          onSave={updateGroupId}
+          onSkip={() => setShowGroupSetup(false)}
+        />
+      )}
     </AuthContext.Provider>
   );
 }

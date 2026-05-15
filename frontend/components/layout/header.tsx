@@ -22,6 +22,7 @@ import { formatDate } from "@/lib/utils";
 import { cn } from "@/lib/utils";
 import { useSocket } from "@/context/SocketContext";
 import { useAuth } from "@/context/AuthContext";
+import { useRouter } from "next/navigation";
 
 export function Header() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -29,7 +30,8 @@ export function Header() {
   const [logs, setLogs] = useState<ActivityLog[]>([]);
   const [activeTab, setActiveTab] = useState<"alerts" | "logs">("alerts");
   const { socket, isConnected } = useSocket();
-  const { user, logout } = useAuth();
+  const { user, logout, openGroupSetup } = useAuth();
+  const router = useRouter();
 
   // Socket listeners
   useEffect(() => {
@@ -152,11 +154,35 @@ export function Header() {
                   </div>
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-56">
+              <DropdownMenuContent align="end" className="w-64">
                 <DropdownMenuLabel className="flex flex-col">
                   <span className="font-semibold">{user.full_name || user.username}</span>
                   <span className="text-xs font-normal text-muted-foreground">{user.email}</span>
+                  {/* Group ID status */}
+                  <span className={`mt-1.5 flex items-center gap-1.5 text-xs font-normal ${
+                    user.group_id ? "text-green-400" : "text-yellow-400"
+                  }`}>
+                    <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                      user.group_id ? "bg-green-400" : "bg-yellow-400"
+                    }`} />
+                    {user.group_id
+                      ? `CoreIoT: ${user.group_id.substring(0, 8)}...`
+                      : "Chưa kết nối CoreIoT"}
+                  </span>
                 </DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={() => router.push("/profile")} className="cursor-pointer">
+                  <svg className="mr-2 h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                  </svg>
+                  <span>Hồ sơ cá nhân</span>
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={openGroupSetup} className="cursor-pointer">
+                  <svg className="mr-2 h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                  </svg>
+                  <span>{user.group_id ? "Đổi Group ID" : "Kết nối CoreIoT"}</span>
+                </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={logout} className="text-red-500 cursor-pointer focus:text-red-500 focus:bg-red-50">
                   <Icons.logout className="mr-2 h-4 w-4" />
