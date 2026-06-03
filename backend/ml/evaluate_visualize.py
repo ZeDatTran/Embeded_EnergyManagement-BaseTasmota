@@ -26,7 +26,7 @@ except ImportError:
     print("Vui lòng cài đặt matplotlib và seaborn bằng lệnh: pip install matplotlib seaborn")
     sys.exit(1)
 
-def evaluate_and_visualize():
+def evaluate_and_visualize(start_date: str = '2026-05-07'):
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
     print("Đang tải dữ liệu...")
@@ -83,25 +83,23 @@ def evaluate_and_visualize():
         return
 
     scores = []
-    predictions = {}
+    all_predictions = {}
 
-    print("Đang đánh giá và dự đoán...")
+    print("Dang danh gia va du doan...")
     for name, model in models.items():
-        y_pred = model.predict(X_test)
-        
-        # Đảm bảo không có dự đoán âm
-        y_pred = np.maximum(y_pred, 0)
-        
-        predictions[name] = y_pred
-        
-        r2 = r2_score(y_test, y_pred)
-        rmse = np.sqrt(mean_squared_error(y_test, y_pred))
-        
-        scores.append({
-            'Model': name,
-            'R2 Score': r2,
-            'RMSE': rmse
-        })
+        # Predict on the FULL dataset so we can plot from any start date
+        y_pred_all = model.predict(X_scaled)
+        y_pred_all = np.maximum(y_pred_all, 0)
+        all_predictions[name] = y_pred_all
+
+        # Metrics on test set only
+        y_pred_test = y_pred_all[len(X_train):]
+        r2   = r2_score(y_test, y_pred_test)
+        rmse = np.sqrt(mean_squared_error(y_test, y_pred_test))
+        scores.append({'Model': name, 'R2 Score': r2, 'RMSE': rmse})
+
+    # Keep separate test predictions for scatter chart
+    predictions = {name: v[len(X_train):] for name, v in all_predictions.items()}
 
     df_scores = pd.DataFrame(scores)
     
@@ -150,34 +148,64 @@ def evaluate_and_visualize():
     plt.close()
 
     # ==========================================
-    # CHART 2: PREDICTION OVER TIME (COMBINED)
+    # CHART 2: PREDICTION OVER TIME (from start_date)
     # ==========================================
-    print("Drawing prediction over time chart...")
-    
-    # Use the last 168 hours (1 week)
-    plot_len = min(168, len(y_test))
-    x_times = test_times[-plot_len:]
-    y_actual = y_test.values[-plot_len:]
-    
-    plt.figure(figsize=(16, 7))
-    plt.plot(x_times, y_actual, label='Actual Energy', color='black', linewidth=2.5, linestyle='solid')
-    
-    colors = ['royalblue', 'forestgreen', 'crimson']
-    for idx, (name, y_pred) in enumerate(predictions.items()):
-        plt.plot(x_times, y_pred[-plot_len:], label=f'Predicted ({name})', color=colors[idx % len(colors)], linewidth=2, alpha=0.8, linestyle='--')
-    
-    plt.title(f'Actual vs Predicted Energy Consumption ({plot_len} hours)', fontsize=14, fontweight='bold')
-    plt.xlabel('Time', fontsize=12)
-    plt.ylabel('Energy (kWh)', fontsize=12)
-    plt.legend(fontsize=11)
-    plt.grid(True, alpha=0.4)
-    plt.xticks(rotation=45)
-    
-    plt.tight_layout()
-    pred_path = RESULTS_DIR / "prediction_over_time.png"
-    plt.savefig(pred_path, dpi=300, bbox_inches='tight')
-    print(f"  -> Saved prediction over time chart at: {pred_path}")
-    plt.close()
+    print("Ve bieu do Prediction Over Time...")
+
+    # Build full-dataset arrays
+    all_times  = time_index
+    all_actual = y.values
+
+    # Filter from start_date
+    start_ts = pd.Timestamp(start_date)
+    mask     = all_times >= start_ts
+
+    x_times_full  = all_times[mask]
+    y_actual_full = all_actual[mask]
+
+    if len(x_times_full) == 0:
+        print(f"  Khong co du lieu tu {start_date}, bo qua Chart 2.")
+    else:
+        # Index of train/test boundary in the full time_index array
+        n_train = len(X_train)
+        train_end_time = all_times[n_train - 1]  # last training timestamp
+
+        plt.figure(figsize=(18, 7))
+
+        # Actual energy
+        plt.plot(x_times_full, y_actual_full,
+                 label='Actual Energy', color='black', linewidth=2, linestyle='solid')
+
+        colors = ['royalblue', 'forestgreen', 'crimson']
+        for idx, (name, y_pred_all) in enumerate(all_predictions.items()):
+            y_pred_filtered = y_pred_all[mask]
+            plt.plot(x_times_full, y_pred_filtered,
+                     label=f'Predicted ({name})',
+                     color=colors[idx % len(colors)],
+                     linewidth=1.8, alpha=0.8, linestyle='--')
+
+        # Vertical line marking train/test split
+        if start_ts <= train_end_time:
+            plt.axvline(x=train_end_time, color='gray', linewidth=1.5,
+                        linestyle=':', alpha=0.9, label=f'Train/Test split ({train_end_time.strftime("%m-%d %H:%M")})')
+            plt.axvspan(all_times[mask][0], train_end_time,
+                        alpha=0.04, color='gray', label='_nolegend_')
+
+        date_from = x_times_full[0].strftime('%d/%m/%Y')
+        date_to   = x_times_full[-1].strftime('%d/%m/%Y')
+        plt.title(f'Actual vs Predicted Energy Consumption\n({date_from} - {date_to}, {len(x_times_full)} hours)',
+                  fontsize=14, fontweight='bold')
+        plt.xlabel('Time', fontsize=12)
+        plt.ylabel('Energy (kWh)', fontsize=12)
+        plt.legend(fontsize=10)
+        plt.grid(True, alpha=0.4)
+        plt.xticks(rotation=45)
+
+        plt.tight_layout()
+        pred_path = RESULTS_DIR / "prediction_over_time.png"
+        plt.savefig(pred_path, dpi=300, bbox_inches='tight')
+        print(f"  -> Saved: {pred_path}")
+        plt.close()
 
     # ==========================================
     # CHART 3: SCATTER PLOT (ACTUAL VS PREDICTED FOR ALL MODELS)
@@ -216,5 +244,117 @@ def evaluate_and_visualize():
     print("\nHoàn tất việc xuất hình ảnh kết quả đánh giá!")
     print(f"Tất cả hình ảnh đã được lưu vào thư mục: {RESULTS_DIR}")
 
+def evaluate_realtime_predictions():
+    """
+    So sánh dữ liệu dự đoán (user_forecast) và dữ liệu thực tế (hourly_kwh/plug_hourly_energy)
+    từ lúc dự đoán cho tới hiện tại (lấy từ MongoDB).
+    """
+    from db_connection import get_db
+    
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    db = get_db()
+    
+    print("Đang tải dữ liệu dự đoán từ MongoDB (user_forecasts)...")
+    forecast = db.user_forecasts.find_one()
+    if not forecast or "PredictedHourlyDetails" not in forecast:
+        print("Không tìm thấy dữ liệu dự đoán trong MongoDB. Vui lòng chạy dự báo trước.")
+        return
+        
+    predictions = forecast["PredictedHourlyDetails"]
+    
+    print("Đang tải dữ liệu thực tế từ MongoDB (hourly_kwh / plug_hourly_energy)...")
+    # Ưu tiên lấy từ hourly_kwh (dữ liệu tổng hợp)
+    actual_hourly = db.hourly_kwh.find()
+    actual_by_hour = {doc["timestamp"]: doc["kwh"] for doc in actual_hourly}
+    
+    # Nếu hourly_kwh không có dữ liệu cho các giờ này, thử lấy từ plug_hourly_energy
+    if len(actual_by_hour) < 10:
+        print("Dữ liệu hourly_kwh ít, đang lấy từ plug_hourly_energy...")
+        actuals = db.plug_hourly_energy.find()
+        for doc in actuals:
+            hr = doc["hour_bucket"]
+            actual_by_hour[hr] = actual_by_hour.get(hr, 0) + doc.get("energy_kwh", 0)
+
+    # Khớp dữ liệu
+    matched_times = []
+    actual_values = []
+    pred_xgb = []
+    pred_rf = []
+    pred_cat = []
+    
+    # Lấy các mốc thời gian có cả dự đoán và thực tế
+    for hr in sorted(predictions.keys()):
+        if hr in actual_by_hour:
+            matched_times.append(hr)
+            actual_values.append(actual_by_hour[hr])
+            pred_dict = predictions[hr]
+            pred_xgb.append(pred_dict.get('XGBoost', 0))
+            pred_rf.append(pred_dict.get('RandomForest', 0))
+            pred_cat.append(pred_dict.get('CatBoost', 0))
+            
+    if not matched_times:
+        print("Không có mốc thời gian nào trùng khớp giữa dự đoán và thực tế.")
+        return
+        
+    print(f"Đã tìm thấy {len(matched_times)} giờ có cả dữ liệu dự đoán và thực tế.")
+    
+    # Tính toán các chỉ số
+    print("\nKết quả Đánh giá Realtime (Thực tế vs Dự đoán):")
+    models_pred = {'XGBoost': pred_xgb, 'Random Forest': pred_rf, 'CatBoost': pred_cat}
+    
+    for name, y_pred in models_pred.items():
+        if len(y_pred) > 1:
+            r2 = r2_score(actual_values, y_pred)
+            rmse = np.sqrt(mean_squared_error(actual_values, y_pred))
+            print(f"- {name}: R² = {r2:.4f}, RMSE = {rmse:.4f}")
+        else:
+            print(f"- {name}: Không đủ điểm dữ liệu để tính R².")
+            
+    # Vẽ biểu đồ So sánh Thực tế vs Dự đoán theo thời gian
+    print("Đang vẽ biểu đồ So sánh Realtime...")
+    plt.figure(figsize=(14, 7))
+    
+    # Giới hạn hiển thị 168 giờ (1 tuần) gần nhất nếu quá nhiều
+    plot_len = min(168, len(matched_times))
+    x_times = matched_times[-plot_len:]
+    y_act = actual_values[-plot_len:]
+    
+    # Xoay nhãn thời gian cho dễ nhìn
+    x_labels = [t[5:13].replace('T', ' ') for t in x_times] # Hiển thị MM-DD HH
+    
+    plt.plot(x_labels, y_act, label='Thực tế (CoreIoT)', color='black', linewidth=2.5, marker='o')
+    
+    colors = {'XGBoost': 'royalblue', 'Random Forest': 'forestgreen', 'CatBoost': 'crimson'}
+    for name, y_pred in models_pred.items():
+        plt.plot(x_labels, y_pred[-plot_len:], label=f'Dự đoán ({name})', color=colors[name], linewidth=2, linestyle='--', marker='x', alpha=0.8)
+        
+    plt.title('So sánh Thực tế (CoreIoT) vs Dự đoán (MongoDB)', fontsize=15, fontweight='bold')
+    plt.xlabel('Thời gian', fontsize=12)
+    plt.ylabel('Điện năng (kWh)', fontsize=12)
+    plt.legend(fontsize=11)
+    plt.grid(True, alpha=0.4)
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    
+    realtime_path = RESULTS_DIR / "realtime_prediction_comparison.png"
+    plt.savefig(realtime_path, dpi=300, bbox_inches='tight')
+    print(f"  -> Đã lưu biểu đồ tại: {realtime_path}")
+    plt.close()
+
 if __name__ == "__main__":
-    evaluate_and_visualize()
+    import argparse
+    parser = argparse.ArgumentParser(description='Danh gia mo hinh du doan')
+    parser.add_argument('--mode', type=str, choices=['offline', 'realtime', 'all'], default='all',
+                        help='offline | realtime | all')
+    parser.add_argument('--start-date', type=str, default='2026-05-07',
+                        help='Ngay bat dau bieu do Chart 2, dinh dang YYYY-MM-DD (mac dinh: 2026-05-07)')
+    args = parser.parse_args()
+
+    if args.mode in ['offline', 'all']:
+        print("=== DANH GIA TREN TAP TEST (OFFLINE) ===")
+        evaluate_and_visualize(start_date=args.start_date)
+
+    if args.mode in ['realtime', 'all']:
+        print("\n=== DANH GIA VOI DU LIEU THUC TE TU COREIOT (REALTIME) ===")
+        evaluate_realtime_predictions()
+
