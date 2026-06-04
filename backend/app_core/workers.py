@@ -6,6 +6,11 @@ from datetime import datetime
 import websocket
 
 from app_core import shared
+from database import find_user_by_id
+from app_core.email_utils import send_email, get_overload_alert_email_html
+
+# Cache for rate limiting warning emails: device_id -> timestamp
+last_email_sent_at = {}
 
 
 def periodic_data_logger():
@@ -231,6 +236,38 @@ def start_websocket(socketio):
                                         logging.info("Auto-shutdown successful for %s", device_id)
                                     else:
                                         logging.error("Auto-shutdown failed for %s: %s", device_id, result)
+                                    
+                                    # Send warning email with rate limit check
+                                    if device_user_id:
+                                        now_ts = time.time()
+                                        last_sent = last_email_sent_at.get(device_id, 0.0)
+                                        if now_ts - last_sent > 300:  # 5 minutes limit
+                                            last_email_sent_at[device_id] = now_ts
+                                            
+                                            def trigger_warning_email(uid, dname, cur, thres, dev_id):
+                                                try:
+                                                    user = find_user_by_id(uid)
+                                                    if user and user.get("email"):
+                                                        user_settings = user.get("settings") or {}
+                                                        if user_settings.get("notification_enabled", True):
+                                                            html_content = get_overload_alert_email_html(
+                                                                user.get("full_name") or user["username"],
+                                                                dname, cur, thres
+                                                            )
+                                                            send_email(
+                                                                user["email"],
+                                                                f"[CẢNH BÁO] Thiết bị {dname} tự động ngắt do quá tải",
+                                                                html_content
+                                                            )
+                                                except Exception as ex:
+                                                    logging.error("Error sending warning email for %s: %s", dev_id, ex)
+                                            
+                                            import threading
+                                            threading.Thread(
+                                                target=trigger_warning_email,
+                                                args=(device_user_id, display_name, current_val, threshold, device_id),
+                                                daemon=True
+                                            ).start()
                                 except Exception as e:
                                     logging.error("Error during auto-shutdown for %s: %s", device_id, e)
 

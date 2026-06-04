@@ -125,10 +125,27 @@ def register_routes(app, socketio):
             device_ids = shared.get_devices_from_group(user_group_id)
 
             available_devices = []
+            from db_users import find_user_by_id
             for device_id in device_ids:
                 cb_config = shared.CUSTOM_CB_DEVICES.get(device_id)
-                if cb_config and cb_config.get("user_id") != user["id"]:
-                    continue
+                if cb_config:
+                    owner_id = cb_config.get("user_id")
+                    if owner_id:
+                        owner = find_user_by_id(owner_id)
+                        if not owner:
+                            logging.info("Cleaning up orphaned device %s from deleted user %s", device_id, owner_id)
+                            delete_device(device_id)
+                            if device_id in shared.DEVICE_METADATA_CACHE:
+                                del shared.DEVICE_METADATA_CACHE[device_id]
+                            if device_id in shared.CUSTOM_CB_DEVICES:
+                                del shared.CUSTOM_CB_DEVICES[device_id]
+                            if device_id in shared.latest_data:
+                                del shared.latest_data[device_id]
+                            cb_config = None
+                        elif owner_id != user["id"]:
+                            continue
+                    elif cb_config.get("user_id") != user["id"]:
+                        continue
                     
                 name = "Unknown Device"
                 dev_type = "Unknown"

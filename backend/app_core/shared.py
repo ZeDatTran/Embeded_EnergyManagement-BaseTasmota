@@ -94,10 +94,22 @@ socketio_instance = None   # set by app.py after SocketIO is created
 
 def load_devices_from_db():
     global CUSTOM_CB_DEVICES, DEVICE_METADATA_CACHE
+    from database import delete_device
+    from db_users import find_user_by_id
     devices = get_all_devices()
     CUSTOM_CB_DEVICES.clear()
     DEVICE_METADATA_CACHE.clear()
     for dev in devices:
+        user_id = dev.get("userId")
+        if user_id:
+            try:
+                owner = find_user_by_id(user_id)
+                if not owner:
+                    logging.info(f"Cleaning up orphaned device {dev['id']} for deleted user {user_id}")
+                    delete_device(dev['id'])
+                    continue
+            except Exception as e:
+                logging.warning(f"Error checking owner for device {dev['id']}: {e}")
         meta = {
             "type": dev.get("type", "cb"),
             "name": dev.get("name"),
@@ -106,7 +118,7 @@ def load_devices_from_db():
             "room_name": dev.get("roomName"),
             "floor": dev.get("floor"),
             "max_load": dev.get("maxLoad"),
-            "user_id": dev.get("userId"),
+            "user_id": user_id,
         }
         CUSTOM_CB_DEVICES[dev["id"]] = meta
         DEVICE_METADATA_CACHE[dev["id"]] = meta

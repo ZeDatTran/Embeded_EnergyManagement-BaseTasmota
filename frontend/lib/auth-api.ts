@@ -10,6 +10,7 @@ export interface AuthUser {
   is_active: boolean;
   avatar_url: string | null;
   group_id: string | null;
+  email_verified: boolean;
   settings: {
     language: string;
     theme: string;
@@ -103,4 +104,69 @@ export async function updateProfile(
   const json = await res.json();
   if (!res.ok) throw new Error(json.message || "Cập nhật thất bại");
   return json.user;
+}
+
+/**
+ * Request sending a verification OTP code to current user's email.
+ */
+export async function sendVerificationCode(token: string): Promise<AuthResponse> {
+  const res = await fetch(`${API_BASE_URL}/api/auth/send-verification`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+  });
+  const json: AuthResponse = await res.json();
+  if (!res.ok) throw new Error(json.message || "Gửi mã xác thực thất bại");
+  return json;
+}
+
+/**
+ * Verify the user's email using the OTP code.
+ */
+export async function verifyEmail(token: string, code: string): Promise<AuthResponse> {
+  const res = await fetch(`${API_BASE_URL}/api/auth/verify-email`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ code }),
+  });
+  const json: AuthResponse = await res.json();
+  if (!res.ok) throw new Error(json.message || "Xác thực email thất bại");
+  return json;
+}
+
+/**
+ * Request a password reset OTP code.
+ */
+export async function forgotPassword(email: string): Promise<AuthResponse> {
+  const res = await fetch(`${API_BASE_URL}/api/auth/forgot-password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  const json: AuthResponse = await res.json();
+  if (!res.ok) throw new Error(json.message || "Gửi mã khôi phục thất bại");
+  return json;
+}
+
+/**
+ * Reset password using the reset OTP code.
+ */
+export async function resetPassword(data: {
+  email: string;
+  code: string;
+  new_password: string;
+}): Promise<AuthResponse> {
+  const res = await fetch(`${API_BASE_URL}/api/auth/reset-password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  const json: AuthResponse = await res.json();
+  if (!res.ok) throw new Error(json.message || "Đặt lại mật khẩu thất bại");
+  return json;
 }
