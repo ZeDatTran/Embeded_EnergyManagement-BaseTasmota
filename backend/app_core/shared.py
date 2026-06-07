@@ -118,6 +118,8 @@ def load_devices_from_db():
             "room_name": dev.get("roomName"),
             "floor": dev.get("floor"),
             "max_load": dev.get("maxLoad"),
+            "overcurrent_threshold": dev.get("overcurrentThreshold", 20.0),
+            "overcurrent_enabled": dev.get("overcurrentEnabled", False),
             "user_id": user_id,
         }
         CUSTOM_CB_DEVICES[dev["id"]] = meta

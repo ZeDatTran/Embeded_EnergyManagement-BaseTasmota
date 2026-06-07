@@ -216,15 +216,18 @@ def register_routes(app, socketio):
             "room_type": room_type,
             "room_name": room_name,
             "floor": floor,
-            "floor": floor,
             "max_load": max_load,
+            "overcurrent_threshold": data.get("overcurrentThreshold", 20.0),
+            "overcurrent_enabled": data.get("overcurrentEnabled", False),
             "user_id": user["id"],
         }
         
         create_device(
             device_id=device_id, user_id=user["id"], name=name, device_type="cb",
             location=location, room_type=room_type, room_name=room_name,
-            floor=floor, max_load=max_load
+            floor=floor, max_load=max_load,
+            overcurrent_threshold=metadata["overcurrent_threshold"],
+            overcurrent_enabled=metadata["overcurrent_enabled"]
         )
 
         shared.DEVICE_METADATA_CACHE[device_id] = metadata
@@ -263,6 +266,8 @@ def register_routes(app, socketio):
                     "roomName": room_name,
                     "floor": floor,
                     "maxLoad": max_load,
+                    "overcurrentThreshold": metadata["overcurrent_threshold"],
+                    "overcurrentEnabled": metadata["overcurrent_enabled"],
                 },
             }
         )
@@ -314,12 +319,16 @@ def register_routes(app, socketio):
             "room_name": room_name,
             "floor": floor,
             "max_load": max_load,
+            "overcurrent_threshold": data.get("overcurrentThreshold", current_meta.get("overcurrent_threshold", 20.0)),
+            "overcurrent_enabled": data.get("overcurrentEnabled", current_meta.get("overcurrent_enabled", False)),
             "user_id": user["id"],
         }
         
         update_device(
             device_id=device_id, name=name, location=location,
-            room_type=room_type, room_name=room_name, floor=floor, max_load=max_load
+            room_type=room_type, room_name=room_name, floor=floor, max_load=max_load,
+            overcurrent_threshold=metadata["overcurrent_threshold"],
+            overcurrent_enabled=metadata["overcurrent_enabled"]
         )
 
         shared.DEVICE_METADATA_CACHE[device_id] = metadata
@@ -355,6 +364,8 @@ def register_routes(app, socketio):
                     "roomName": room_name,
                     "floor": floor,
                     "maxLoad": max_load,
+                    "overcurrentThreshold": metadata["overcurrent_threshold"],
+                    "overcurrentEnabled": metadata["overcurrent_enabled"],
                 },
             }
         )
@@ -408,6 +419,8 @@ def register_routes(app, socketio):
                     "roomName": meta.get("room_name", ""),
                     "floor": meta.get("floor"),
                     "maxLoad": meta.get("max_load", 32),
+                    "overcurrentThreshold": meta.get("overcurrent_threshold", 20.0),
+                    "overcurrentEnabled": meta.get("overcurrent_enabled", False),
                     "attributes": device_info.get("attributes", {}),
                     "telemetry": device_info.get("telemetry", {}),
                 }

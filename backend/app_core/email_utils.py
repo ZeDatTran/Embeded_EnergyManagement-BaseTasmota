@@ -57,21 +57,21 @@ def get_verification_email_html(username: str, code: str) -> str:
     <head>
         <meta charset="utf-8">
         <style>
-            body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #0f172a; color: #f1f5f9; padding: 20px; }}
-            .container {{ max-width: 600px; margin: 0 auto; background-color: #1e293b; border: 1px solid #334155; border-radius: 16px; padding: 32px; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3); }}
-            .header {{ text-align: center; border-bottom: 1px solid #334155; padding-bottom: 20px; margin-bottom: 24px; }}
-            .logo {{ font-size: 24px; font-weight: bold; color: #3b82f6; }}
-            .greeting {{ font-size: 18px; margin-bottom: 16px; color: #f8fafc; }}
-            .message {{ font-size: 15px; line-height: 1.6; color: #cbd5e1; margin-bottom: 24px; }}
-            .code-container {{ text-align: center; background-color: #0f172a; border: 1px solid #334155; border-radius: 12px; padding: 20px; margin: 24px 0; }}
-            .code {{ font-size: 32px; font-weight: bold; color: #10b981; letter-spacing: 6px; font-family: monospace; }}
-            .footer {{ font-size: 12px; color: #64748b; text-align: center; border-top: 1px solid #334155; padding-top: 20px; margin-top: 32px; }}
+            body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f8fafc; color: #0f172a; padding: 20px; }}
+            .container {{ max-width: 600px; margin: 0 auto; background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 16px; padding: 32px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03); }}
+            .header {{ text-align: center; border-bottom: 1px solid #e2e8f0; padding-bottom: 20px; margin-bottom: 24px; }}
+            .logo {{ font-size: 24px; font-weight: bold; color: #2563eb; }}
+            .greeting {{ font-size: 18px; margin-bottom: 16px; color: #0f172a; font-weight: 600; }}
+            .message {{ font-size: 15px; line-height: 1.6; color: #334155; margin-bottom: 24px; }}
+            .code-container {{ text-align: center; background-color: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 12px; padding: 20px; margin: 24px 0; }}
+            .code {{ font-size: 32px; font-weight: bold; color: #059669; letter-spacing: 6px; font-family: monospace; }}
+            .footer {{ font-size: 12px; color: #64748b; text-align: center; border-top: 1px solid #e2e8f0; padding-top: 20px; margin-top: 32px; }}
         </style>
     </head>
     <body>
         <div class="container">
             <div class="header">
-                <div class="logo">⚡ Smart Home</div>
+                <div class="logo">Smart Home</div>
             </div>
             <div class="greeting">Xin chào {username},</div>
             <div class="message">
@@ -80,7 +80,7 @@ def get_verification_email_html(username: str, code: str) -> str:
             </div>
             <div class="code-container">
                 <div class="code">{code}</div>
-                <div style="font-size: 13px; color: #94a3b8; margin-top: 8px;">Mã xác thực có hiệu lực trong vòng 10 phút.</div>
+                <div style="font-size: 13px; color: #64748b; margin-top: 8px;">Mã xác thực có hiệu lực trong vòng 10 phút.</div>
             </div>
             <div class="message">
                 Nếu bạn không thực hiện yêu cầu này, vui lòng bỏ qua email này hoặc liên hệ hỗ trợ nếu nghi ngờ tài khoản bị xâm nhập.
@@ -102,21 +102,21 @@ def get_reset_password_email_html(username: str, code: str) -> str:
     <head>
         <meta charset="utf-8">
         <style>
-            body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #0f172a; color: #f1f5f9; padding: 20px; }}
-            .container {{ max-width: 600px; margin: 0 auto; background-color: #1e293b; border: 1px solid #334155; border-radius: 16px; padding: 32px; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3); }}
-            .header {{ text-align: center; border-bottom: 1px solid #334155; padding-bottom: 20px; margin-bottom: 24px; }}
-            .logo {{ font-size: 24px; font-weight: bold; color: #3b82f6; }}
-            .greeting {{ font-size: 18px; margin-bottom: 16px; color: #f8fafc; }}
-            .message {{ font-size: 15px; line-height: 1.6; color: #cbd5e1; margin-bottom: 24px; }}
-            .code-container {{ text-align: center; background-color: #0f172a; border: 1px solid #334155; border-radius: 12px; padding: 20px; margin: 24px 0; }}
-            .code {{ font-size: 32px; font-weight: bold; color: #3b82f6; letter-spacing: 6px; font-family: monospace; }}
-            .footer {{ font-size: 12px; color: #64748b; text-align: center; border-top: 1px solid #334155; padding-top: 20px; margin-top: 32px; }}
+            body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f8fafc; color: #0f172a; padding: 20px; }}
+            .container {{ max-width: 600px; margin: 0 auto; background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 16px; padding: 32px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03); }}
+            .header {{ text-align: center; border-bottom: 1px solid #e2e8f0; padding-bottom: 20px; margin-bottom: 24px; }}
+            .logo {{ font-size: 24px; font-weight: bold; color: #2563eb; }}
+            .greeting {{ font-size: 18px; margin-bottom: 16px; color: #0f172a; font-weight: 600; }}
+            .message {{ font-size: 15px; line-height: 1.6; color: #334155; margin-bottom: 24px; }}
+            .code-container {{ text-align: center; background-color: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 12px; padding: 20px; margin: 24px 0; }}
+            .code {{ font-size: 32px; font-weight: bold; color: #2563eb; letter-spacing: 6px; font-family: monospace; }}
+            .footer {{ font-size: 12px; color: #64748b; text-align: center; border-top: 1px solid #e2e8f0; padding-top: 20px; margin-top: 32px; }}
         </style>
     </head>
     <body>
         <div class="container">
             <div class="header">
-                <div class="logo">⚡ Smart Home</div>
+                <div class="logo">Smart Home</div>
             </div>
             <div class="greeting">Xin chào {username},</div>
             <div class="message">
@@ -125,9 +125,9 @@ def get_reset_password_email_html(username: str, code: str) -> str:
             </div>
             <div class="code-container">
                 <div class="code">{code}</div>
-                <div style="font-size: 13px; color: #94a3b8; margin-top: 8px;">Mã này có hiệu lực trong vòng 10 phút.</div>
+                <div style="font-size: 13px; color: #64748b; margin-top: 8px;">Mã này có hiệu lực trong vòng 10 phút.</div>
             </div>
-            <div class="message" style="color: #f43f5e; font-weight: 500;">
+            <div class="message" style="color: #dc2626; font-weight: 500;">
                 Lưu ý: Tuyệt đối không chia sẻ mã này với bất kỳ ai để tránh bị mất tài khoản.
             </div>
             <div class="footer">
@@ -149,33 +149,33 @@ def get_overload_alert_email_html(username: str, device_name: str, current: floa
     <head>
         <meta charset="utf-8">
         <style>
-            body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #0f172a; color: #f1f5f9; padding: 20px; }}
-            .container {{ max-width: 600px; margin: 0 auto; background-color: #1e293b; border: 2px solid #ef4444; border-radius: 16px; padding: 32px; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5); }}
+            body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f8fafc; color: #0f172a; padding: 20px; }}
+            .container {{ max-width: 600px; margin: 0 auto; background-color: #ffffff; border: 2px solid #ef4444; border-radius: 16px; padding: 32px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05); }}
             .header {{ text-align: center; border-bottom: 1px solid #ef4444; padding-bottom: 20px; margin-bottom: 24px; }}
             .logo {{ font-size: 24px; font-weight: bold; color: #ef4444; }}
-            .greeting {{ font-size: 18px; margin-bottom: 16px; color: #f8fafc; }}
-            .message {{ font-size: 15px; line-height: 1.6; color: #cbd5e1; margin-bottom: 24px; }}
-            .details-container {{ background-color: #1a0e0e; border: 1px solid #ef4444; border-radius: 12px; padding: 20px; margin: 24px 0; }}
-            .details-row {{ display: flex; justify-content: space-between; border-bottom: 1px solid #2e1818; padding: 8px 0; font-size: 14px; }}
+            .greeting {{ font-size: 18px; margin-bottom: 16px; color: #0f172a; font-weight: 600; }}
+            .message {{ font-size: 15px; line-height: 1.6; color: #334155; margin-bottom: 24px; }}
+            .details-container {{ background-color: #fef2f2; border: 1px solid #fee2e2; border-radius: 12px; padding: 20px; margin: 24px 0; }}
+            .details-row {{ display: flex; justify-content: space-between; border-bottom: 1px solid #fecaca; padding: 8px 0; font-size: 14px; }}
             .details-row:last-child {{ border-bottom: none; }}
-            .label {{ color: #94a3b8; font-weight: 500; }}
-            .value {{ color: #f1f5f9; font-weight: bold; }}
-            .danger-text {{ color: #f43f5e; }}
-            .success-text {{ color: #10b981; }}
-            .footer {{ font-size: 12px; color: #64748b; text-align: center; border-top: 1px solid #334155; padding-top: 20px; margin-top: 32px; }}
+            .label {{ color: #475569; font-weight: 500; }}
+            .value {{ color: #0f172a; font-weight: bold; }}
+            .danger-text {{ color: #dc2626; }}
+            .success-text {{ color: #16a34a; }}
+            .footer {{ font-size: 12px; color: #64748b; text-align: center; border-top: 1px solid #e2e8f0; padding-top: 20px; margin-top: 32px; }}
         </style>
     </head>
     <body>
         <div class="container">
             <div class="header">
-                <div class="logo">⚠️ CẢNH BÁO QUÁ TẢI THIẾT BỊ</div>
+                <div class="logo">CẢNH BÁO QUÁ TẢI THIẾT BỊ</div>
             </div>
             <div class="greeting">Xin chào {username},</div>
             <div class="message">
                 Hệ thống Smart Home phát hiện thiết bị của bạn đã vượt quá ngưỡng dòng điện cho phép và đã tự động ngắt điện lập tức để đảm bảo an toàn phòng chống cháy nổ.
             </div>
             <div class="details-container">
-                <div style="font-size: 16px; font-weight: bold; color: #f43f5e; margin-bottom: 12px; border-bottom: 1px solid #ef4444; padding-bottom: 6px;">Thông tin chi tiết:</div>
+                <div style="font-size: 16px; font-weight: bold; color: #dc2626; margin-bottom: 12px; border-bottom: 1px solid #ef4444; padding-bottom: 6px;">Thông tin chi tiết:</div>
                 <div class="details-row">
                     <span class="label">Thiết bị:</span>
                     <span class="value">{device_name}</span>

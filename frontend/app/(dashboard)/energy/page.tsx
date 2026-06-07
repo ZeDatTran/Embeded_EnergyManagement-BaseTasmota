@@ -13,6 +13,8 @@ interface DeviceCurrentData {
   deviceId: string
   deviceName: string
   current: number
+  overcurrentThreshold?: number
+  overcurrentEnabled?: boolean
 }
 
 export default function EnergyPage() {
@@ -49,7 +51,9 @@ export default function EnergyPage() {
             newMap.set(item.id, {
               deviceId: item.id,
               deviceName: item.name,
-              current: current
+              current: current,
+              overcurrentThreshold: item.metadata?.overcurrent_threshold ?? 20.0,
+              overcurrentEnabled: item.metadata?.overcurrent_enabled ?? false,
             })
           })
           setDevicesCurrentData(newMap)
@@ -69,7 +73,9 @@ export default function EnergyPage() {
               newMap.set(payload.device_id, {
                 deviceId: payload.device_id,
                 deviceName: deviceName,
-                current: value
+                current: value,
+                overcurrentThreshold: payload.data.metadata?.overcurrent_threshold ?? existing?.overcurrentThreshold ?? 20.0,
+                overcurrentEnabled: payload.data.metadata?.overcurrent_enabled ?? existing?.overcurrentEnabled ?? false,
               })
               console.log(`Updated device ${payload.device_id} (${deviceName}) current to ${value}A`)
               return newMap
@@ -81,10 +87,31 @@ export default function EnergyPage() {
       }
     }
 
+    const onDeviceUpdated = (payload: any) => {
+      console.log("Energy page received device_updated:", payload)
+      if (payload?.device_id && payload?.metadata) {
+        setDevicesCurrentData((prev) => {
+          const newMap = new Map(prev)
+          const existing = newMap.get(payload.device_id)
+          if (existing) {
+            newMap.set(payload.device_id, {
+              ...existing,
+              deviceName: payload.metadata.name || existing.deviceName,
+              overcurrentThreshold: payload.metadata.overcurrent_threshold ?? existing.overcurrentThreshold,
+              overcurrentEnabled: payload.metadata.overcurrent_enabled ?? existing.overcurrentEnabled,
+            })
+          }
+          return newMap
+        })
+      }
+    }
+
     socket.on("dashboard_update", onDashboardUpdate)
+    socket.on("device_updated", onDeviceUpdated)
 
     return () => {
       socket.off("dashboard_update", onDashboardUpdate)
+      socket.off("device_updated", onDeviceUpdated)
     }
   }, [socket, isConnected])
 
@@ -105,7 +132,10 @@ export default function EnergyPage() {
       return { deviceId: "", deviceName: "Không có thiết bị", current: 0 }
     }
 
-    let maxDevice: DeviceCurrentData = { deviceId: "", deviceName: "", current: 0 }
+    // Default to the first device in the map to handle cases where all currents are 0
+    const firstDevice = Array.from(devicesCurrentData.values())[0]
+    let maxDevice: DeviceCurrentData = { ...firstDevice }
+
     devicesCurrentData.forEach((device) => {
       if (device.current > maxDevice.current) {
         maxDevice = device
@@ -161,6 +191,9 @@ export default function EnergyPage() {
           <ThresholdAlert
             currentAmps={maxCurrentDevice.current}
             deviceName={maxCurrentDevice.deviceName}
+            deviceId={maxCurrentDevice.deviceId}
+            overcurrentThreshold={maxCurrentDevice.overcurrentThreshold}
+            overcurrentEnabled={maxCurrentDevice.overcurrentEnabled}
           />
         </div>
       </div>

@@ -204,14 +204,11 @@ def start_websocket(socketio):
                         display_name = shared.latest_data[device_id]["metadata"]["name"]
 
                         cb_config = shared.CUSTOM_CB_DEVICES.get(device_id)
-                        device_user_id = cb_config.get("user_id") if cb_config else None
+                        if cb_config and cb_config.get("overcurrent_enabled", False):
+                            threshold = cb_config.get("overcurrent_threshold", 20.0)
+                            device_user_id = cb_config.get("user_id")
 
-                        for sid, info in shared.client_thresholds.items():
-                            threshold = info.get("threshold", 100)
-                            client_user_id = info.get("user_id")
-                            
-                            # Only trigger alert if current > threshold AND device belongs to this user
-                            if device_user_id == client_user_id and current_val > threshold:
+                            if current_val > threshold:
                                 msg = {
                                     "level": "DANGER",
                                     "device_id": device_id,
@@ -222,7 +219,8 @@ def start_websocket(socketio):
                                         f"vượt ngưỡng {threshold}A."
                                     ),
                                 }
-                                socketio.emit("alert_trigger", msg, room=sid)
+                                if device_user_id:
+                                    socketio.emit("alert_trigger", msg, room=f"user_{device_user_id}_dashboard")
 
                                 try:
                                     logging.warning(
@@ -270,8 +268,6 @@ def start_websocket(socketio):
                                             ).start()
                                 except Exception as e:
                                     logging.error("Error during auto-shutdown for %s: %s", device_id, e)
-
-                                break
 
                 if "POWER" in telemetry_data:
                     power_val = telemetry_data["POWER"][0][1]

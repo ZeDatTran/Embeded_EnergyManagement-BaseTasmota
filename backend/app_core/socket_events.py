@@ -84,28 +84,82 @@ def register_socket_handlers(socketio):
     @socketio.on("set_alert_threshold")
     def handle_set_threshold(data):
         try:
-            threshold = float(data.get("threshold", 100))
             user_id = session.get("user_id")
-            shared.client_thresholds[request.sid] = {"threshold": threshold, "user_id": user_id}
-            join_room("alert")
-            logging.info("Client %s (User %s) set threshold: %sA", request.sid, user_id, threshold)
+            if not user_id:
+                logging.warning("set_alert_threshold rejected: User not logged in")
+                return
+
+            device_id = data.get("deviceId")
+            if not device_id:
+                logging.warning("set_alert_threshold rejected: Missing deviceId")
+                return
+
+            # Check permission
+            cb_config = shared.CUSTOM_CB_DEVICES.get(device_id)
+            if not cb_config or cb_config.get("user_id") != user_id:
+                logging.warning("set_alert_threshold rejected: Device not found or no permission for user %s", user_id)
+                return
+
+            threshold_val = data.get("threshold")
+            enabled_val = data.get("enabled")
+
+            # Resolve final values — keep existing from cache if not sent in payload
+            enabled = bool(enabled_val) if enabled_val is not None else cb_config.get("overcurrent_enabled", False)
+            threshold = float(threshold_val) if threshold_val is not None else cb_config.get("overcurrent_threshold", 20.0)
+
+            # Only write threshold to DB if it was explicitly sent (toggle-only should NOT overwrite threshold)
+            update_kwargs: dict = {"overcurrent_enabled": enabled}
+            if threshold_val is not None:
+                update_kwargs["overcurrent_threshold"] = threshold
+
+            # Update DB - only write fields that changed
+            from database import update_device
+            update_device(device_id, **update_kwargs)
+
+            # Update in-memory caches
+            cb_config["overcurrent_threshold"] = threshold
+            cb_config["overcurrent_enabled"] = enabled
+
+            if device_id in shared.DEVICE_METADATA_CACHE:
+                shared.DEVICE_METADATA_CACHE[device_id]["overcurrent_threshold"] = threshold
+                shared.DEVICE_METADATA_CACHE[device_id]["overcurrent_enabled"] = enabled
+            if device_id in shared.latest_data:
+                if "metadata" not in shared.latest_data[device_id]:
+                    shared.latest_data[device_id]["metadata"] = {}
+                shared.latest_data[device_id]["metadata"]["overcurrent_threshold"] = threshold
+                shared.latest_data[device_id]["metadata"]["overcurrent_enabled"] = enabled
+
+            logging.info("User %s updated overcurrent settings for %s: threshold=%sA, enabled=%s", user_id, device_id, threshold, enabled)
+
+            # Broadcast update to dashboard room so UI reloads correctly
+            socketio.emit(
+                "device_updated",
+                {
+                    "device_id": device_id,
+                    "metadata": cb_config,
+                    "timestamp": datetime.now().isoformat()
+                },
+                room=f"user_{user_id}_dashboard"
+            )
+
+            # Log activity
+            action_desc = "Bật bảo vệ quá dòng" if enabled else "Tắt bảo vệ quá dòng"
+            if threshold_val is not None and enabled_val is None:
+                action_desc = "Cài đặt ngưỡng bảo vệ quá dòng"
 
             log_entry = {
                 "id": f"log-{int(time.time() * 1000)}",
-                "action": "Cài đặt ngưỡng cảnh báo",
-                "deviceId": None,
-                "deviceName": None,
+                "action": action_desc,
+                "deviceId": device_id,
+                "deviceName": cb_config.get("name", "Unknown CB"),
                 "user": "Hệ thống",
                 "timestamp": datetime.now().isoformat(),
-                "details": f"Ngưỡng: {threshold}A",
+                "details": f"Ngưỡng: {threshold}A | Trạng thái: {'Bật' if enabled else 'Tắt'}",
             }
-            user_id = session.get("user_id")
-            if user_id:
-                emit("activity_log", log_entry, room=f"user_{user_id}_logs")
-            else:
-                emit("activity_log", log_entry)
-        except (ValueError, TypeError):
-            logging.error("Invalid threshold data from client %s", request.sid)
+            socketio.emit("activity_log", log_entry, room=f"user_{user_id}_logs")
+
+        except (ValueError, TypeError) as e:
+            logging.error("Invalid threshold data: %s", str(e))
 
     @socketio.on("subscribe_devices")
     def handle_subscribe_devices():
