@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useRef, useEffect, useCallback } from "react"
+import { useVoiceChat, type VoiceStatus } from "./useVoiceChat"
 
 //  Types 
 interface Message {
@@ -95,8 +96,26 @@ export function ChatWidget() {
   const [input, setInput] = useState("")
   const [loading, setLoading] = useState(false)
   const [sessionId] = useState(getOrCreateSessionId)
+  const [autoSpeak, setAutoSpeak] = useState(true)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const pendingSendRef = useRef(false)
+
+  // ── Voice Chat Hook ──
+  const voice = useVoiceChat({
+    lang: "vi-VN",
+    autoSpeak,
+    onTranscript: (text) => {
+      setInput(text)
+      pendingSendRef.current = true
+    },
+    onError: (err) => {
+      setMessages((prev) => [
+        ...prev,
+        { id: `verr-${Date.now()}`, role: "assistant", content: err, timestamp: new Date(), isError: true },
+      ])
+    },
+  })
 
   // Auto-scroll
   useEffect(() => {
@@ -107,6 +126,14 @@ export function ChatWidget() {
   useEffect(() => {
     if (open) setTimeout(() => inputRef.current?.focus(), 150)
   }, [open])
+
+  // Auto-send after voice transcript is set
+  useEffect(() => {
+    if (pendingSendRef.current && input.trim()) {
+      pendingSendRef.current = false
+      sendMessage()
+    }
+  }, [input])
 
   const sendMessage = useCallback(
     async (text?: string) => {
@@ -146,6 +173,10 @@ export function ChatWidget() {
             isError: data.status !== "success",
           },
         ])
+        // Auto-speak AI response
+        if (autoSpeak && data.status === "success") {
+          voice.speak(reply)
+        }
       } catch (err: unknown) {
         clearTimeout(timeoutId)
         const isTimeout = err instanceof Error && err.name === "AbortError"
@@ -436,6 +467,71 @@ export function ChatWidget() {
         }
         .send-btn:hover:not(:disabled) { transform: scale(1.08); }
         .send-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+        /* Voice buttons */
+        .mic-btn {
+          width: 40px; height: 40px;
+          background: transparent;
+          border: 1px solid rgba(99,102,241,0.3);
+          border-radius: 12px;
+          cursor: pointer;
+          display: flex; align-items: center; justify-content: center;
+          font-size: 18px;
+          flex-shrink: 0;
+          transition: all 0.2s;
+          color: #94a3b8;
+          position: relative;
+        }
+        .mic-btn:hover { border-color: #6366f1; color: #e0e7ff; background: rgba(99,102,241,0.1); }
+        .mic-btn.mic-active {
+          background: rgba(239,68,68,0.15);
+          border-color: #ef4444;
+          color: #ef4444;
+          animation: mic-pulse 1.5s infinite;
+        }
+        .mic-btn.mic-speaking {
+          background: rgba(16,185,129,0.15);
+          border-color: #10b981;
+          color: #10b981;
+        }
+        @keyframes mic-pulse {
+          0%,100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.4); }
+          50% { box-shadow: 0 0 0 8px rgba(239,68,68,0); }
+        }
+
+        .speaker-toggle {
+          background: none; border: none; cursor: pointer;
+          color: #94a3b8; font-size: 14px;
+          width: 30px; height: 30px;
+          border-radius: 8px;
+          display: flex; align-items: center; justify-content: center;
+          transition: background 0.15s, color 0.15s;
+        }
+        .speaker-toggle:hover { background: rgba(255,255,255,0.08); color: #e0e7ff; }
+        .speaker-toggle.speaker-on { color: #10b981; }
+
+        .interim-bar {
+          padding: 6px 12px;
+          background: rgba(99,102,241,0.08);
+          border-top: 1px solid rgba(99,102,241,0.15);
+          font-size: 12px;
+          color: #a5b4fc;
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          animation: fadeIn 0.2s;
+        }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+        .voice-status-bar {
+          padding: 4px 12px;
+          font-size: 11px;
+          color: #64748b;
+          text-align: center;
+          border-top: 1px solid rgba(99,102,241,0.1);
+        }
+        .voice-status-bar.status-listening { color: #ef4444; }
+        .voice-status-bar.status-speaking { color: #10b981; }
       `}</style>
 
       {/* ── FAB Button ── */}
@@ -461,6 +557,13 @@ export function ChatWidget() {
               Gemini · Luôn sẵn sàng
             </p>
           </div>
+          <button
+            className={`speaker-toggle ${autoSpeak ? "speaker-on" : ""}`}
+            onClick={() => { if (autoSpeak) voice.stopSpeaking(); setAutoSpeak((v) => !v); }}
+            title={autoSpeak ? "Tắt đọc phản hồi" : "Bật đọc phản hồi"}
+          >
+            {autoSpeak ? "🔊" : "🔇"}
+          </button>
           <button className="chat-header-btn" onClick={clearChat} title="Xóa lịch sử chat">
             🗑
           </button>
@@ -494,17 +597,57 @@ export function ChatWidget() {
           </div>
         )}
 
+        {/* Interim transcript bar */}
+        {voice.interimTranscript && (
+          <div className="interim-bar">
+            🎙️ <span>{voice.interimTranscript}</span>
+          </div>
+        )}
+
+        {/* Voice status bar */}
+        {voice.status !== "idle" && (
+          <div className={`voice-status-bar status-${voice.status}`}>
+            {voice.status === "listening" && "🎤 Đang nghe..."}
+            {voice.status === "processing" && "⏳ Đang xử lý..."}
+            {voice.status === "speaking" && (
+              <span>
+                🔊 Đang đọc...{" "}
+                <button
+                  onClick={voice.stopSpeaking}
+                  style={{ background: "none", border: "none", color: "#ef4444", cursor: "pointer", fontSize: "11px" }}
+                >
+                  [Dừng]
+                </button>
+              </span>
+            )}
+          </div>
+        )}
+
         {/* Input */}
         <div className="chat-input-area">
+          <button
+            className={`mic-btn ${voice.status === "listening" ? "mic-active" :
+                voice.status === "speaking" ? "mic-speaking" : ""
+              }`}
+            onClick={voice.toggleListening}
+            disabled={loading}
+            title={
+              voice.status === "listening" ? "Dừng nghe" :
+                voice.status === "speaking" ? "Ngắt AI & nói" :
+                  "Nhấn để nói (vi-VN)"
+            }
+            aria-label="Microphone"
+          >
+            {voice.status === "listening" ? "⏹" : "🎤"}
+          </button>
           <textarea
             ref={inputRef}
             className="chat-textarea"
-            placeholder="Nhập câu hỏi... (Enter để gửi)"
+            placeholder="Nhập câu hỏi, enter để gửi..."
             value={input}
             rows={1}
             onChange={(e) => {
               setInput(e.target.value)
-              // Auto-resize
               e.target.style.height = "auto"
               e.target.style.height = `${Math.min(e.target.scrollHeight, 100)}px`
             }}

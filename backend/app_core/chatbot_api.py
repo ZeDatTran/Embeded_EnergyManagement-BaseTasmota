@@ -1547,3 +1547,74 @@ def chat_status():
         "active_sessions":     len(_chat_sessions),
         "tools_count":         8,
     })
+
+
+# ── FPT.AI Text-to-Speech Proxy ─────────────────────────────────────────────
+FPT_TTS_API_KEY = os.getenv("FPT_TTS_API_KEY", "")
+FPT_TTS_VOICE   = os.getenv("FPT_TTS_VOICE", "banmai")
+FPT_TTS_URL     = "https://api.fpt.ai/hmi/tts/v5"
+
+
+def _strip_markdown_for_tts(text: str) -> str:
+    """Clean markdown/HTML so TTS reads natural Vietnamese."""
+    import re
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)     # bold
+    text = re.sub(r"\*(.+?)\*", r"\1", text)          # italic
+    text = re.sub(r"`(.+?)`", r"\1", text)            # inline code
+    text = re.sub(r"<br\s*/?>", ". ", text)            # line breaks
+    text = re.sub(r"<[^>]+>", "", text)                # HTML tags
+    text = text.replace("•", ". ")                     # bullets
+    text = re.sub(r"[↑↓]", "", text)                   # arrows
+    text = re.sub(r"\n+", ". ", text)                  # newlines
+    text = re.sub(r"\s{2,}", " ", text)                # collapse spaces
+    return text.strip()
+
+
+@chatbot_bp.route("/api/tts", methods=["POST"])
+def tts_endpoint():
+    """Proxy to FPT.AI TTS — accepts {text, voice?, speed?}, returns {audio_url}."""
+    if not FPT_TTS_API_KEY:
+        return jsonify({"status": "error", "message": "FPT_TTS_API_KEY chưa cấu hình."}), 500
+
+    data  = request.get_json(silent=True) or {}
+    text  = (data.get("text") or "").strip()
+    voice = (data.get("voice") or FPT_TTS_VOICE).strip()
+    speed = str(data.get("speed", "0"))
+
+    if not text:
+        return jsonify({"status": "error", "message": "Thiếu text."}), 400
+
+    # Clean markdown for natural speech
+    clean_text = _strip_markdown_for_tts(text)
+    if not clean_text:
+        return jsonify({"status": "error", "message": "Text rỗng sau khi xử lý."}), 400
+
+    try:
+        headers = {
+            "api-key": FPT_TTS_API_KEY,
+            "speed":   speed,
+            "voice":   voice,
+        }
+        resp = requests.post(
+            FPT_TTS_URL,
+            data=clean_text.encode("utf-8"),
+            headers=headers,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        result = resp.json()
+
+        audio_url = result.get("async")
+        if not audio_url:
+            logging.warning("FPT TTS response missing 'async': %s", result)
+            return jsonify({"status": "error", "message": "FPT TTS không trả về URL audio."}), 502
+
+        return jsonify({
+            "status":    "success",
+            "audio_url": audio_url,
+            "voice":     voice,
+            "duration":  result.get("duration"),
+        })
+    except requests.RequestException as exc:
+        logging.exception("FPT TTS error: %s", exc)
+        return jsonify({"status": "error", "message": f"Lỗi FPT TTS: {exc}"}), 502

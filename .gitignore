@@ -130,7 +130,9 @@ Thumbs.db
 .AppleDouble
 .LSOverride
 
-.bat
+# run file
+
+*.bat
 
 # Windows
 $RECYCLE.BIN/
