@@ -35,11 +35,12 @@ interface AuthContextValue {
   logout: () => void;
   updateGroupId: (groupId: string) => Promise<void>;
   openGroupSetup: () => void;
+  refreshUser: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
-const PUBLIC_PATHS = ["/login", "/register"];
+const PUBLIC_PATHS = ["/login", "/register", "/forgot-password"];
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
@@ -141,6 +142,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [token]
   );
 
+  const refreshUser = useCallback(async () => {
+    if (!token) return;
+    const updated = await fetchCurrentUser(token);
+    if (updated) {
+      setUser(updated);
+    }
+  }, [token]);
+
   return (
     <AuthContext.Provider
       value={{
@@ -153,6 +162,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         logout,
         updateGroupId,
         openGroupSetup: () => setShowGroupSetup(true),
+        refreshUser,
       }}
     >
       {children}

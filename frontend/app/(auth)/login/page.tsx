@@ -93,9 +93,14 @@ export default function LoginPage() {
           </div>
 
           <div className="auth-field">
-            <label htmlFor="login-password" className="auth-label">
-              Mật khẩu
-            </label>
+            <div className="flex justify-between items-center mb-1">
+              <label htmlFor="login-password" className="auth-label" style={{ marginBottom: 0 }}>
+                Mật khẩu
+              </label>
+              <Link href="/forgot-password" className="text-xs text-blue-400 hover:text-blue-300 transition">
+                Quên mật khẩu?
+              </Link>
+            </div>
             <div className="auth-input-wrapper">
               <input
                 id="login-password"

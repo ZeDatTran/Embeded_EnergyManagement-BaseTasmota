@@ -31,6 +31,7 @@ print("[OK] Improved Ensemble Model + scaler_improved.pkl loaded.")
 # Tên các cột (giống hệt lúc train)
 IMPROVED_FEATURES = [
     'hour', 'dayofweek', 'month', 'is_weekend', 'quarter', 'is_holiday_period',
+    'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos',
     'kwh_lag_1h', 'kwh_lag_24h', 'kwh_lag_48h', 'kwh_lag_168h', 'kwh_lag_336h',
     'kwh_rolling_mean_6h', 'kwh_rolling_std_6h', 'kwh_rolling_min_6h', 'kwh_rolling_max_6h',
     'kwh_rolling_mean_24h', 'kwh_rolling_std_24h', 'kwh_rolling_min_24h', 'kwh_rolling_max_24h',
@@ -154,6 +155,10 @@ def _build_improved_features(
         'is_weekend': int(ts.dayofweek >= 5),
         'quarter': ((ts.month - 1) // 3) + 1,
         'is_holiday_period': int(ts.month in [1, 12]),
+        'hour_sin': float(np.sin(2 * np.pi * ts.hour / 24)),
+        'hour_cos': float(np.cos(2 * np.pi * ts.hour / 24)),
+        'dow_sin': float(np.sin(2 * np.pi * ts.dayofweek / 7)),
+        'dow_cos': float(np.cos(2 * np.pi * ts.dayofweek / 7)),
         'kwh_lag_1h': lag_1,
         'kwh_lag_24h': lag_24,
         'kwh_lag_48h': lag_48,

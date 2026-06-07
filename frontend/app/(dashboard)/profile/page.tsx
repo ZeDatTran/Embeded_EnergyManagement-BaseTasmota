@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useAuth } from "@/context/AuthContext";
+import { sendVerificationCode, verifyEmail } from "@/lib/auth-api";
 
 function InfoRow({ label, value, mono = false }: { label: string; value: React.ReactNode; mono?: boolean }) {
   return (
@@ -45,7 +46,68 @@ function CopyButton({ text }: { text: string }) {
 }
 
 export default function ProfilePage() {
-  const { user, logout, openGroupSetup } = useAuth();
+  const { user, token, logout, openGroupSetup, refreshUser } = useAuth();
+
+  // Verification modal states
+  const [showVerifyModal, setShowVerifyModal] = useState(false);
+  const [otpCode, setOtpCode] = useState("");
+  const [verifying, setVerifying] = useState(false);
+  const [sendingOtp, setSendingOtp] = useState(false);
+  const [verifyError, setVerifyError] = useState("");
+  const [verifySuccess, setVerifySuccess] = useState("");
+
+  const handleStartVerification = async () => {
+    if (!token) return;
+    setVerifyError("");
+    setVerifySuccess("");
+    setSendingOtp(true);
+    setShowVerifyModal(true);
+    try {
+      await sendVerificationCode(token);
+      setVerifySuccess("Mã OTP xác thực đã được gửi tới email của bạn!");
+    } catch (err: any) {
+      setVerifyError(err.message || "Không thể gửi mã xác thực. Vui lòng thử lại.");
+    } finally {
+      setSendingOtp(false);
+    }
+  };
+
+  const handleSendOtpAgain = async () => {
+    if (!token) return;
+    setVerifyError("");
+    setVerifySuccess("");
+    setSendingOtp(true);
+    try {
+      await sendVerificationCode(token);
+      setVerifySuccess("Mã OTP mới đã được gửi tới email của bạn!");
+    } catch (err: any) {
+      setVerifyError(err.message || "Không thể gửi mã xác thực. Vui lòng thử lại.");
+    } finally {
+      setSendingOtp(false);
+    }
+  };
+
+  const handleSubmitVerification = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!token || !otpCode.trim()) return;
+    setVerifyError("");
+    setVerifySuccess("");
+    setVerifying(true);
+    try {
+      await verifyEmail(token, otpCode.trim());
+      setVerifySuccess("Xác thực email thành công!");
+      await refreshUser();
+      setTimeout(() => {
+        setShowVerifyModal(false);
+        setOtpCode("");
+        setVerifySuccess("");
+      }, 1500);
+    } catch (err: any) {
+      setVerifyError(err.message || "Mã xác thực không chính xác hoặc đã hết hạn.");
+    } finally {
+      setVerifying(false);
+    }
+  };
 
   if (!user) return null;
 
@@ -86,7 +148,39 @@ export default function ProfilePage() {
           <div>
             <InfoRow label="Tên đăng nhập" value={user.username} />
             <InfoRow label="Họ và tên" value={user.full_name || <span className="text-gray-600 italic">Chưa cập nhật</span>} />
-            <InfoRow label="Email" value={user.email} />
+            <InfoRow 
+              label="Email" 
+              value={
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <span>{user.email}</span>
+                  <div className="flex items-center gap-2">
+                    {user.email_verified ? (
+                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-500/15 text-green-400">
+                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                        </svg>
+                        Đã xác thực
+                      </span>
+                    ) : (
+                      <>
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-500/15 text-red-400">
+                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                          Chưa xác thực
+                        </span>
+                        <button
+                          onClick={handleStartVerification}
+                          className="px-2.5 py-1 rounded bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium transition"
+                        >
+                          Xác thực ngay
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              } 
+            />
             <InfoRow label="Ngày tham gia" value={joinedDate} />
           </div>
         </div>
@@ -150,6 +244,99 @@ export default function ProfilePage() {
         </div>
 
       </div>
+
+      {/* Email Verification Modal */}
+      {showVerifyModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="relative w-full max-w-md overflow-hidden rounded-2xl border border-white/10 bg-slate-900/95 p-6 shadow-2xl backdrop-blur-md animate-in zoom-in-95 duration-200">
+            {/* Header */}
+            <div className="mb-4">
+              <h3 className="text-lg font-semibold text-white">Xác thực tài khoản Email</h3>
+              <p className="text-xs text-gray-400 mt-1">Mã OTP 6 chữ số đã được gửi đến email: <span className="text-gray-200 font-medium">{user.email}</span></p>
+            </div>
+
+            {/* Notifications */}
+            {verifySuccess && (
+              <div className="mb-4 p-3 rounded-xl bg-green-500/10 border border-green-500/20 text-green-400 text-xs">
+                {verifySuccess}
+              </div>
+            )}
+            {verifyError && (
+              <div className="mb-4 p-3 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-xs">
+                {verifyError}
+              </div>
+            )}
+
+            {/* Form */}
+            <form onSubmit={handleSubmitVerification} className="space-y-4">
+              <div>
+                <label htmlFor="otp-input" className="block text-xs font-medium uppercase tracking-wider text-gray-400 mb-1.5">
+                  Mã xác thực (OTP)
+                </label>
+                <input
+                  id="otp-input"
+                  type="text"
+                  maxLength={6}
+                  placeholder="123456"
+                  value={otpCode}
+                  onChange={(e) => setOtpCode(e.target.value)}
+                  className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-center tracking-[8px] font-mono text-lg text-white focus:border-blue-500 focus:outline-none transition"
+                  autoComplete="one-time-code"
+                  disabled={verifying}
+                  required
+                  autoFocus
+                />
+              </div>
+
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-gray-500">Chưa nhận được mã?</span>
+                <button
+                  type="button"
+                  onClick={handleSendOtpAgain}
+                  className="text-blue-400 hover:text-blue-300 font-medium transition disabled:opacity-50"
+                  disabled={sendingOtp || verifying}
+                >
+                  {sendingOtp ? "Đang gửi lại..." : "Gửi lại mã OTP"}
+                </button>
+              </div>
+
+              {/* Actions */}
+              <div className="flex gap-3 justify-end pt-2 border-t border-white/5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowVerifyModal(false);
+                    setVerifyError("");
+                    setVerifySuccess("");
+                    setOtpCode("");
+                  }}
+                  className="px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white text-sm font-medium transition"
+                  disabled={verifying}
+                >
+                  Hủy bỏ
+                </button>
+                <button
+                  type="submit"
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium transition disabled:opacity-50"
+                  disabled={verifying || !otpCode.trim() || sendingOtp}
+                >
+                  {verifying ? (
+                    <>
+                      <svg className="animate-spin h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                      </svg>
+                      Đang xác minh...
+                    </>
+                  ) : (
+                    "Xác nhận"
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

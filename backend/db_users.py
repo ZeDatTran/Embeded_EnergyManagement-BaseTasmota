@@ -23,6 +23,11 @@ def create_user(
         "role": role,
         "is_active": True,
         "avatar_url": None,
+        "email_verified": False,
+        "verification_code": None,
+        "verification_code_expires_at": None,
+        "reset_code": None,
+        "reset_code_expires_at": None,
         "settings": {
             "language": "vi",
             "theme": "dark",
@@ -59,6 +64,8 @@ def update_user(user_id: str, **fields) -> dict | None:
     allowed = {
         "email", "username", "password_hash", "full_name",
         "role", "is_active", "avatar_url", "settings", "coreiot_config",
+        "email_verified", "verification_code", "verification_code_expires_at",
+        "reset_code", "reset_code_expires_at",
     }
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:

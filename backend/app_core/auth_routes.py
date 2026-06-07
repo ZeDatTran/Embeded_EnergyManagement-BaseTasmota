@@ -4,6 +4,13 @@ import re
 import logging
 from datetime import datetime, timedelta, timezone
 from functools import wraps
+import random
+
+from app_core.email_utils import (
+    send_email,
+    get_verification_email_html,
+    get_reset_password_email_html,
+)
 
 import jwt
 from flask import jsonify, request
@@ -64,9 +71,15 @@ def _sanitise_user(user: dict) -> dict:
     """Return user dict without sensitive fields."""
     safe = dict(user)
     safe.pop("password_hash", None)
+    safe.pop("verification_code", None)
+    safe.pop("verification_code_expires_at", None)
+    safe.pop("reset_code", None)
+    safe.pop("reset_code_expires_at", None)
     # Expose group_id at top level for convenience
     coreiot = safe.get("coreiot_config") or {}
     safe["group_id"] = coreiot.get("group_id") or None
+    # Ensure email_verified defaults to False if not present
+    safe["email_verified"] = user.get("email_verified", False)
     return safe
 
 
@@ -200,4 +213,159 @@ def register_auth_routes(app):
             "status": "success",
             "message": "Cập nhật thành công",
             "user": _sanitise_user(user),
+        })
+
+    # ── POST /api/auth/send-verification ──────────────────────────────
+    @app.route("/api/auth/send-verification", methods=["POST"])
+    def auth_send_verification():
+        user, err = _get_current_user()
+        if err:
+            return err
+        
+        email = user.get("email")
+        if not email:
+            return jsonify({"status": "error", "message": "Người dùng không có địa chỉ email"}), 400
+
+        # Generate a 6-digit verification code
+        code = f"{random.randint(100000, 999999)}"
+        expires_at = (datetime.now() + timedelta(minutes=10)).isoformat()
+
+        # Save to database
+        update_user(
+            user["id"],
+            verification_code=code,
+            verification_code_expires_at=expires_at
+        )
+
+        # Send email
+        html_content = get_verification_email_html(user.get("full_name") or user["username"], code)
+        sent = send_email(email, "Mã xác thực tài khoản Smart Home", html_content)
+        
+        if not sent:
+            return jsonify({"status": "error", "message": "Không thể gửi email xác thực"}), 500
+
+        return jsonify({
+            "status": "success",
+            "message": f"Mã xác thực đã được gửi tới email {email}"
+        })
+
+    # ── POST /api/auth/verify-email ───────────────────────────────────
+    @app.route("/api/auth/verify-email", methods=["POST"])
+    def auth_verify_email():
+        user, err = _get_current_user()
+        if err:
+            return err
+        
+        data = request.get_json(silent=True) or {}
+        code = (data.get("code") or "").strip()
+
+        if not code:
+            return jsonify({"status": "error", "message": "Vui lòng nhập mã xác thực"}), 400
+
+        db_code = user.get("verification_code")
+        expires_at = user.get("verification_code_expires_at")
+        now = datetime.now().isoformat()
+
+        if not db_code or not expires_at:
+            return jsonify({"status": "error", "message": "Yêu cầu mã xác thực mới trước"}), 400
+
+        if db_code != code:
+            return jsonify({"status": "error", "message": "Mã xác thực không chính xác"}), 400
+
+        if expires_at < now:
+            return jsonify({"status": "error", "message": "Mã xác thực đã hết hạn"}), 400
+
+        # Mark verified and clear code
+        user = update_user(
+            user["id"],
+            email_verified=True,
+            verification_code=None,
+            verification_code_expires_at=None
+        )
+
+        return jsonify({
+            "status": "success",
+            "message": "Xác thực email thành công",
+            "user": _sanitise_user(user)
+        })
+
+    # ── POST /api/auth/forgot-password ───────────────────────────────
+    @app.route("/api/auth/forgot-password", methods=["POST"])
+    def auth_forgot_password():
+        data = request.get_json(silent=True) or {}
+        email = (data.get("email") or "").strip().lower()
+
+        if not email or not _EMAIL_RE.match(email):
+            return jsonify({"status": "error", "message": "Email không hợp lệ"}), 400
+
+        user = find_user_by_email(email)
+        if not user:
+            return jsonify({"status": "error", "message": "Không tìm thấy tài khoản với email này"}), 404
+
+        # Generate a 6-digit password reset code
+        code = f"{random.randint(100000, 999999)}"
+        expires_at = (datetime.now() + timedelta(minutes=10)).isoformat()
+
+        # Save to database
+        update_user(
+            user["id"],
+            reset_code=code,
+            reset_code_expires_at=expires_at
+        )
+
+        # Send email
+        html_content = get_reset_password_email_html(user.get("full_name") or user["username"], code)
+        sent = send_email(email, "Mã khôi phục mật khẩu Smart Home", html_content)
+
+        if not sent:
+            return jsonify({"status": "error", "message": "Không thể gửi email khôi phục mật khẩu"}), 500
+
+        return jsonify({
+            "status": "success",
+            "message": f"Mã khôi phục đã được gửi tới email {email}"
+        })
+
+    # ── POST /api/auth/reset-password ────────────────────────────────
+    @app.route("/api/auth/reset-password", methods=["POST"])
+    def auth_reset_password():
+        data = request.get_json(silent=True) or {}
+        email = (data.get("email") or "").strip().lower()
+        code = (data.get("code") or "").strip()
+        new_password = data.get("new_password") or ""
+
+        if not email or not code or not new_password:
+            return jsonify({"status": "error", "message": "Vui lòng nhập đầy đủ thông tin"}), 400
+
+        if len(new_password) < 6:
+            return jsonify({"status": "error", "message": "Mật khẩu mới phải có ít nhất 6 ký tự"}), 400
+
+        user = find_user_by_email(email)
+        if not user:
+            return jsonify({"status": "error", "message": "Không tìm thấy tài khoản với email này"}), 404
+
+        db_code = user.get("reset_code")
+        expires_at = user.get("reset_code_expires_at")
+        now = datetime.now().isoformat()
+
+        if not db_code or not expires_at:
+            return jsonify({"status": "error", "message": "Yêu cầu mã khôi phục mới trước"}), 400
+
+        if db_code != code:
+            return jsonify({"status": "error", "message": "Mã khôi phục không chính xác"}), 400
+
+        if expires_at < now:
+            return jsonify({"status": "error", "message": "Mã khôi phục đã hết hạn"}), 400
+
+        # Update password and clear reset code
+        password_hash = generate_password_hash(new_password)
+        update_user(
+            user["id"],
+            password_hash=password_hash,
+            reset_code=None,
+            reset_code_expires_at=None
+        )
+
+        return jsonify({
+            "status": "success",
+            "message": "Đặt lại mật khẩu thành công. Vui lòng đăng nhập lại."
         })

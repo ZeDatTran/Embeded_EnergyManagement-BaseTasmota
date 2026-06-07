@@ -42,18 +42,18 @@ HEADERS = {"Authorization": f"Bearer {JWT_TOKEN}"} if JWT_TOKEN else {}
 
 def create_advanced_features(df):
     """
-    Enhanced feature engineering with more sophisticated time series features
+    Enhanced feature engineering with more sophisticated time series features.
+    Adapts lag/rolling window sizes based on available data to avoid losing
+    too many rows and degrading model quality on short histories.
     """
     df = df.copy()
+    n_hours = len(df)
 
     # ===== EXPLICIT LINEAR TREND LAYER =====
-    # Build a deterministic time index and estimate a global linear baseline.
-    # The model can then learn deviations from this baseline instead of over-trusting
-    # historically high absolute levels.
-    df['time_idx'] = np.arange(len(df), dtype=float)
-    if len(df) >= 2:
+    df['time_idx'] = np.arange(n_hours, dtype=float)
+    if n_hours >= 2:
         trend_slope, trend_intercept = np.polyfit(df['time_idx'], df['kwh_hour'].astype(float), 1)
-    elif len(df) == 1:
+    elif n_hours == 1:
         trend_slope, trend_intercept = 0.0, float(df['kwh_hour'].iloc[0])
     else:
         trend_slope, trend_intercept = 0.0, 0.0
@@ -61,7 +61,7 @@ def create_advanced_features(df):
     df['linear_trend'] = trend_slope * df['time_idx'] + trend_intercept
     df['kwh_detrended'] = df['kwh_hour'] - df['linear_trend']
     df['trend_slope'] = trend_slope
-    
+
     # ===== TEMPORAL FEATURES =====
     df['hour'] = df.index.hour
     df['dayofweek'] = df.index.dayofweek
@@ -69,41 +69,75 @@ def create_advanced_features(df):
     df['is_weekend'] = (df.index.dayofweek >= 5).astype(int)
     df['quarter'] = df.index.quarter
     df['is_holiday_period'] = df['month'].isin([1, 12]).astype(int)
-    
-    # ===== LAG FEATURES (24/48/168/long horizon) =====
+
+    # ===== CYCLIC ENCODING for hour (avoids ordinal artifact 23->0 gap) =====
+    df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
+    df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
+    df['dow_sin'] = np.sin(2 * np.pi * df['dayofweek'] / 7)
+    df['dow_cos'] = np.cos(2 * np.pi * df['dayofweek'] / 7)
+
+    # ===== LAG FEATURES — adaptive based on data length =====
+    # Always safe: 1h and 24h lags
     df['kwh_lag_1h'] = df['kwh_hour'].shift(1)
     df['kwh_lag_24h'] = df['kwh_hour'].shift(24)
     df['kwh_lag_48h'] = df['kwh_hour'].shift(48)
-    df['kwh_lag_168h'] = df['kwh_hour'].shift(168)  # 1 week
-    # Use 2-week lag only when history is long enough; otherwise fallback to 1-week lag.
-    long_lag_hours = 336 if len(df) >= 500 else 168
-    df['kwh_lag_336h'] = df['kwh_hour'].shift(long_lag_hours)
 
-    # Keep this column usable even with short/sparse histories.
-    if df['kwh_lag_336h'].isna().all():
-        df['kwh_lag_336h'] = df['kwh_lag_168h']
-    
-    # ===== ROLLING STATISTICS (NEW) =====
-    for window in [6, 24, 48]:
-        df[f'kwh_rolling_mean_{window}h'] = df['kwh_hour'].shift(24).rolling(window=window).mean()
-        df[f'kwh_rolling_std_{window}h'] = df['kwh_hour'].shift(24).rolling(window=window).std()
-        df[f'kwh_rolling_min_{window}h'] = df['kwh_hour'].shift(24).rolling(window=window).min()
-        df[f'kwh_rolling_max_{window}h'] = df['kwh_hour'].shift(24).rolling(window=window).max()
-    
-    # ===== TREND FEATURES (NEW) =====
+    # 168h (1-week) lag only when history is long enough that dropna keeps >=60% of rows.
+    # A 168h lag + 48h rolling window costs ~216 leading rows; on 735h that's 29% waste.
+    # Require >=800h (≈33 days) before enabling 1-week lags.
+    use_week_lag = n_hours >= 800
+    if use_week_lag:
+        df['kwh_lag_168h'] = df['kwh_hour'].shift(168)
+        long_lag_hours = 336 if n_hours >= 700 else 168
+        df['kwh_lag_336h'] = df['kwh_hour'].shift(long_lag_hours)
+        if df['kwh_lag_336h'].isna().all():
+            df['kwh_lag_336h'] = df['kwh_lag_168h']
+    else:
+        # Short dataset: use 48h as the longest lag to preserve more samples
+        df['kwh_lag_168h'] = df['kwh_hour'].shift(48)   # proxy 48h
+        df['kwh_lag_336h'] = df['kwh_hour'].shift(48)
+
+    # ===== ROLLING STATISTICS =====
+    # Use smaller windows when dataset is short to avoid eating samples
+    roll_windows = [6, 24, 48] if n_hours >= 500 else [6, 12, 24]
+    for window in roll_windows:
+        df[f'kwh_rolling_mean_{window}h'] = df['kwh_hour'].shift(1).rolling(window=window, min_periods=max(1, window//2)).mean()
+        df[f'kwh_rolling_std_{window}h']  = df['kwh_hour'].shift(1).rolling(window=window, min_periods=max(1, window//2)).std()
+        df[f'kwh_rolling_min_{window}h']  = df['kwh_hour'].shift(1).rolling(window=window, min_periods=max(1, window//2)).min()
+        df[f'kwh_rolling_max_{window}h']  = df['kwh_hour'].shift(1).rolling(window=window, min_periods=max(1, window//2)).max()
+
+    # Rename columns to fixed names so downstream code always finds them
+    for alias_from, alias_to in [
+        (f'kwh_rolling_mean_{roll_windows[-1]}h', 'kwh_rolling_mean_48h'),
+        (f'kwh_rolling_std_{roll_windows[-1]}h',  'kwh_rolling_std_48h'),
+        (f'kwh_rolling_min_{roll_windows[-1]}h',  'kwh_rolling_min_48h'),
+        (f'kwh_rolling_max_{roll_windows[-1]}h',  'kwh_rolling_max_48h'),
+    ]:
+        if alias_from != alias_to and alias_from in df.columns:
+            df[alias_to] = df[alias_from]
+
+    # ===== TREND FEATURES =====
     df['kwh_trend_24h'] = (df['kwh_hour'].shift(24) - df['kwh_hour'].shift(48)) / (df['kwh_hour'].shift(48) + 0.01)
-    df['kwh_trend_168h'] = (df['kwh_lag_168h'] - df['kwh_lag_336h']) / (df['kwh_lag_336h'] + 0.01)
+    if use_week_lag:
+        df['kwh_trend_168h'] = (df['kwh_lag_168h'] - df['kwh_lag_336h']) / (df['kwh_lag_336h'] + 0.01)
+    else:
+        df['kwh_trend_168h'] = df['kwh_trend_24h']  # reuse 24h trend as proxy
 
-    # ===== DETRENDED FEATURES (NEW) =====
+    # ===== DETRENDED LAG FEATURES =====
     df['kwh_detrended_lag_24h'] = df['kwh_detrended'].shift(24)
-    df['kwh_detrended_lag_168h'] = df['kwh_detrended'].shift(168)
-    df['kwh_detrended_roll_mean_24h'] = df['kwh_detrended'].shift(24).rolling(window=24).mean()
-    df['kwh_detrended_roll_std_24h'] = df['kwh_detrended'].shift(24).rolling(window=24).std()
-    
-    # ===== INTERACTION FEATURES (NEW) =====
+    if use_week_lag:
+        df['kwh_detrended_lag_168h'] = df['kwh_detrended'].shift(168)
+        df['kwh_detrended_roll_mean_24h'] = df['kwh_detrended'].shift(24).rolling(window=24, min_periods=12).mean()
+        df['kwh_detrended_roll_std_24h']  = df['kwh_detrended'].shift(24).rolling(window=24, min_periods=12).std()
+    else:
+        df['kwh_detrended_lag_168h'] = df['kwh_detrended'].shift(48)
+        df['kwh_detrended_roll_mean_24h'] = df['kwh_detrended'].shift(1).rolling(window=12, min_periods=6).mean()
+        df['kwh_detrended_roll_std_24h']  = df['kwh_detrended'].shift(1).rolling(window=12, min_periods=6).std()
+
+    # ===== INTERACTION FEATURES =====
     df['hour_kwh_interaction'] = df['hour'] * df['kwh_lag_24h']
     df['daytype_kwh_interaction'] = df['is_weekend'] * df['kwh_lag_24h']
-    
+
     return df.dropna()
 
 
@@ -331,19 +365,19 @@ def train_improved_models():
     
     scores = {}
     
-    # [1] XGBoost - TUNED (with anti-collapse fallback)
+    # [1] XGBoost — reduced depth + lighter regularization to balance under/overfit
     print("\n  [1/3] Training XGBoost (Tuned)...")
     xgb_params_primary = {
-        "n_estimators": 400,
+        "n_estimators": 500,
         "learning_rate": 0.03,
-        "max_depth": 6,
-        "min_child_weight": 2,
+        "max_depth": 4,           # was 6 → shallower trees generalise better on small data
+        "min_child_weight": 3,    # was 2 → require more samples per leaf
         "subsample": 0.8,
         "colsample_bytree": 0.8,
-        "colsample_bylevel": 0.8,
-        "gamma": 0.001,
-        "reg_alpha": 0.01,
-        "reg_lambda": 1,
+        "colsample_bylevel": 0.7,
+        "gamma": 0.05,            # was 0.001 → prune splits with small gain
+        "reg_alpha": 0.05,        # was 0.01 → mild L1
+        "reg_lambda": 2.0,        # was 1 → stronger L2 weight decay
         "objective": "reg:squarederror",
         "eval_metric": "rmse",
         "random_state": 42,
@@ -355,23 +389,23 @@ def train_improved_models():
     model_xgb.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
 
     y_pred_xgb_train = model_xgb.predict(X_train)
-    y_pred_xgb_test = model_xgb.predict(X_test)
+    y_pred_xgb_test  = model_xgb.predict(X_test)
     xgb_train_r2 = r2_score(y_train, y_pred_xgb_train)
-    xgb_test_r2 = r2_score(y_test, y_pred_xgb_test)
+    xgb_test_r2  = r2_score(y_test,  y_pred_xgb_test)
     xgb_pred_std = float(np.std(y_pred_xgb_test))
 
-    # Auto-retrain if XGBoost collapses to near-constant predictions or severe underfit.
-    if xgb_pred_std < 1e-6 or (xgb_train_r2 < 0.1 and xgb_test_r2 < 0.1):
-        print("     XGBoost appears underfit/collapsed -> retry with relaxed params...")
+    # Retry if predictions collapse to near-constant OR test R² is significantly negative
+    if xgb_pred_std < 1e-6 or xgb_test_r2 < -0.3:
+        print("     XGBoost underfit/collapsed → retry with relaxed params...")
         xgb_params_fallback = {
             "n_estimators": 700,
-            "learning_rate": 0.03,
-            "max_depth": 6,
-            "min_child_weight": 1,
+            "learning_rate": 0.02,
+            "max_depth": 5,
+            "min_child_weight": 2,
             "subsample": 0.9,
             "colsample_bytree": 0.9,
             "gamma": 0,
-            "reg_alpha": 0,
+            "reg_alpha": 0.01,
             "reg_lambda": 1,
             "objective": "reg:squarederror",
             "eval_metric": "rmse",
@@ -383,26 +417,27 @@ def train_improved_models():
         model_xgb = xgb.XGBRegressor(**xgb_params_fallback)
         model_xgb.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
         y_pred_xgb_train = model_xgb.predict(X_train)
-        y_pred_xgb_test = model_xgb.predict(X_test)
+        y_pred_xgb_test  = model_xgb.predict(X_test)
         xgb_train_r2 = r2_score(y_train, y_pred_xgb_train)
-        xgb_test_r2 = r2_score(y_test, y_pred_xgb_test)
+        xgb_test_r2  = r2_score(y_test,  y_pred_xgb_test)
 
     joblib.dump(model_xgb, MODELS_DIR / "model_xgb_improved.pkl")
     scores['XGBoost'] = {
         'train': xgb_train_r2,
-        'test': xgb_test_r2,
-        'rmse': np.sqrt(mean_squared_error(y_test, y_pred_xgb_test))
+        'test':  xgb_test_r2,
+        'rmse':  np.sqrt(mean_squared_error(y_test, y_pred_xgb_test))
     }
     print(f"     Train R²: {scores['XGBoost']['train']:.4f} | Test R²: {scores['XGBoost']['test']:.4f}")
     
-    # [2] Random Forest - TUNED
+    # [2] Random Forest — reduced depth to fix severe overfitting (was train=0.88, test=-0.92)
     print("  [2/3] Training Random Forest (Tuned)...")
     model_rf = RandomForestRegressor(
-        n_estimators=150,      # ⬆️ Increased
-        max_depth=18,          # Slightly deeper
-        min_samples_split=5,   # NEW
-        min_samples_leaf=2,    # NEW
-        max_features='sqrt',   # NEW: Feature randomness
+        n_estimators=200,
+        max_depth=8,              # was 18 → KEY FIX: shallower trees prevent memorisation
+        min_samples_split=8,      # was 5 → harder to create splits on small leaf sets
+        min_samples_leaf=4,       # was 2 → each leaf needs at least 4 samples
+        max_features=0.5,         # was 'sqrt' → reduce feature set per split further
+        max_samples=0.85,         # Bootstrap sample fraction — adds variance penalty
         random_state=42,
         n_jobs=-1,
         verbose=0
@@ -410,11 +445,11 @@ def train_improved_models():
     model_rf.fit(X_train, y_train)
     joblib.dump(model_rf, MODELS_DIR / "model_rf_improved.pkl")
     y_pred_rf_train = model_rf.predict(X_train)
-    y_pred_rf_test = model_rf.predict(X_test)
+    y_pred_rf_test  = model_rf.predict(X_test)
     scores['RandomForest'] = {
         'train': r2_score(y_train, y_pred_rf_train),
-        'test': r2_score(y_test, y_pred_rf_test),
-        'rmse': np.sqrt(mean_squared_error(y_test, y_pred_rf_test))
+        'test':  r2_score(y_test,  y_pred_rf_test),
+        'rmse':  np.sqrt(mean_squared_error(y_test, y_pred_rf_test))
     }
     print(f"     Train R²: {scores['RandomForest']['train']:.4f} | Test R²: {scores['RandomForest']['test']:.4f}")
     
@@ -425,8 +460,9 @@ def train_improved_models():
         try:
             model_cat = CatBoostRegressor(
                 iterations=800,
-                depth=6,
+                depth=5,              # was 6 → slightly shallower to reduce overfit
                 learning_rate=0.03,
+                l2_leaf_reg=5.0,      # L2 regularisation on leaf values
                 loss_function="RMSE",
                 random_seed=42,
                 verbose=False,
