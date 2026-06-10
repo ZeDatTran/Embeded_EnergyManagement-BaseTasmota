@@ -278,12 +278,18 @@ export async function controlAllDevices(command: "ON" | "OFF"): Promise<Device[]
 
 export async function fetchEnergyData(
   period: "day" | "week" | "month",
-  deviceId?: string
+  deviceId?: string,
+  year?: number,
+  month?: number
 ): Promise<EnergyData[]> {
   try {
     const query = new URLSearchParams({ period });
     if (deviceId) {
       query.set("deviceId", deviceId);
+    }
+    if (year !== undefined && month !== undefined) {
+      query.set("year", year.toString());
+      query.set("month", month.toString());
     }
     const response = await fetch(`${API_BASE_URL}/api/energy?${query.toString()}`, {
       headers: getAuthHeaders(),

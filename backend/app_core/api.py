@@ -1974,6 +1974,8 @@ def register_routes(app, socketio):
             
             period = request.args.get("period", "day")
             requested_device_id = (request.args.get("deviceId") or "").strip()
+            req_year = request.args.get("year")
+            req_month = request.args.get("month")
             now = datetime.now()
 
             start_of_this_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -1981,16 +1983,36 @@ def register_routes(app, socketio):
 
             if period == "day":
                 start_time = start_of_today
+                end_time = now
             elif period == "week":
                 seven_days_ago = now - timedelta(days=7)
                 start_time = max(seven_days_ago, start_of_this_month)
+                end_time = now
             elif period == "month":
-                start_time = start_of_this_month
+                if req_year and req_month:
+                    try:
+                        y, m = int(req_year), int(req_month)
+                        start_time = datetime(y, m, 1)
+                        # End of selected month
+                        if m == 12:
+                            end_time = datetime(y + 1, 1, 1) - timedelta(seconds=1)
+                        else:
+                            end_time = datetime(y, m + 1, 1) - timedelta(seconds=1)
+                        # If selected month is current month, use now as end_time
+                        if y == now.year and m == now.month:
+                            end_time = now
+                    except (ValueError, TypeError):
+                        start_time = start_of_this_month
+                        end_time = now
+                else:
+                    start_time = start_of_this_month
+                    end_time = now
             else:
                 start_time = now - timedelta(hours=24)
+                end_time = now
 
             start_ts = int(start_time.timestamp() * 1000)
-            end_ts = int(now.timestamp() * 1000)
+            end_ts = int(end_time.timestamp() * 1000)
 
             # Prefer tracked CB devices for current user
             if requested_device_id:
@@ -2019,24 +2041,44 @@ def register_routes(app, socketio):
             for device_id in device_ids:
                 try:
                     url = f"{shared.CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/values/timeseries"
-                    params = {
-                        "keys": "ENERGY-Total",
-                        "startTs": start_ts,
-                        "endTs": end_ts,
-                        "limit": 50000,  # raw data - no aggregation
-                        "orderBy": "ASC",
-                    }
-                    resp = requests.get(url, headers=shared.HEADERS, params=params, timeout=20)
-                    resp.raise_for_status()
-                    raw = resp.json()
-
-                    entries = raw.get("ENERGY-Total", [])
-                    if not entries:
+                    
+                    # Fetch data in weekly chunks to avoid hitting API limit (50000 per request).
+                    # Devices reporting every 10-30s can produce 260K+ points/month, exceeding a single request.
+                    all_entries = []
+                    seen_ts = set()
+                    chunk_duration_ms = 7 * 86400 * 1000  # 7 days
+                    chunk_start = start_ts
+                    
+                    while chunk_start < end_ts:
+                        chunk_end = min(chunk_start + chunk_duration_ms, end_ts)
+                        try:
+                            params = {
+                                "keys": "ENERGY-Total",
+                                "startTs": chunk_start,
+                                "endTs": chunk_end,
+                                "limit": 50000,
+                                "agg": "NONE",
+                                "interval": 0,
+                            }
+                            resp = requests.get(url, headers=shared.HEADERS, params=params, timeout=20)
+                            resp.raise_for_status()
+                            raw = resp.json()
+                            entries = raw.get("ENERGY-Total", [])
+                            for entry in entries:
+                                ts = entry.get("ts")
+                                if ts not in seen_ts:
+                                    seen_ts.add(ts)
+                                    all_entries.append(entry)
+                        except Exception as chunk_err:
+                            logging.warning("Energy chunk fetch failed for device %s [%s-%s]: %s", device_id, chunk_start, chunk_end, chunk_err)
+                        chunk_start = chunk_end
+                    
+                    if not all_entries:
                         continue
 
                     # Parse all entries, sort ascending by timestamp
                     parsed = []
-                    for entry in entries:
+                    for entry in all_entries:
                         try:
                             ts_ms = int(entry.get("ts"))
                             val = float(entry.get("value") or 0.0)
@@ -2048,13 +2090,22 @@ def register_routes(app, socketio):
                         continue
 
                     parsed.sort(key=lambda x: x[0])
+                    logging.info("Energy data for device %s: %d points, first=%s (%.4f), last=%s (%.4f)",
+                                 device_id, len(parsed),
+                                 datetime.fromtimestamp(parsed[0][0]/1000).isoformat(), parsed[0][1],
+                                 datetime.fromtimestamp(parsed[-1][0]/1000).isoformat(), parsed[-1][1])
 
                     prev_ts_ms, prev_total = parsed[0]
+                    device_total_kwh = 0.0
                     for ts_ms, total_kwh in parsed[1:]:
                         delta = total_kwh - prev_total
 
                         if delta < 0:
-                            # Counter reset: update baseline but don't count this delta
+                            # Counter reset detected. 
+                            # The energy consumed BEFORE reset is already counted from previous deltas.
+                            # After reset, start fresh from the new baseline.
+                            logging.debug("Counter reset for device %s at %s: %.4f -> %.4f", 
+                                         device_id, datetime.fromtimestamp(ts_ms/1000).isoformat(), prev_total, total_kwh)
                             prev_ts_ms, prev_total = ts_ms, total_kwh
                             continue
 
@@ -2070,8 +2121,11 @@ def register_routes(app, socketio):
                             dt_interval = dt.replace(hour=0, minute=0, second=0, microsecond=0)
                         interval_ts = int(dt_interval.timestamp() * 1000)
                         totals_by_interval_ts[interval_ts] = totals_by_interval_ts.get(interval_ts, 0.0) + delta
+                        device_total_kwh += delta
 
                         prev_ts_ms, prev_total = ts_ms, total_kwh
+                    
+                    logging.info("Device %s total energy from deltas: %.4f kWh", device_id, device_total_kwh)
                 except Exception as e:
                     logging.warning("Energy aggregation skipped device %s due to error: %s", device_id, e)
 
@@ -2082,24 +2136,28 @@ def register_routes(app, socketio):
 
             # Generate response with all intervals (fill missing with 0)
             response_data = []
-            if totals_by_interval_ts:
-                sorted_ts = sorted(totals_by_interval_ts.keys())
-                first_ts = sorted_ts[0]
-                last_ts = sorted_ts[-1]
-                
-                # Generate all intervals from first to last
-                current_ts = first_ts
-                while current_ts <= last_ts:
-                    kwh = totals_by_interval_ts.get(current_ts, 0.0)
-                    dt_obj = datetime.fromtimestamp(current_ts / 1000)
-                    response_data.append(
-                        {
-                            "timestamp": dt_obj.isoformat(),
-                            "consumption": round(max(0.0, kwh), 6),
-                            "cost": round(max(0.0, kwh) * avg_price_per_kwh, 2),
-                        }
-                    )
-                    current_ts += interval_ms
+            # Always generate intervals from start_ts to end_ts to cover the full period
+            # (e.g. day 1 to day 30/31 for month view, not just from first data point)
+            current_ts = start_ts
+            # Align to interval boundary
+            dt_start = datetime.fromtimestamp(current_ts / 1000)
+            if not is_hourly:
+                dt_start = dt_start.replace(hour=0, minute=0, second=0, microsecond=0)
+            else:
+                dt_start = dt_start.replace(minute=0, second=0, microsecond=0)
+            current_ts = int(dt_start.timestamp() * 1000)
+
+            while current_ts <= end_ts:
+                kwh = totals_by_interval_ts.get(current_ts, 0.0)
+                dt_obj = datetime.fromtimestamp(current_ts / 1000)
+                response_data.append(
+                    {
+                        "timestamp": dt_obj.isoformat(),
+                        "consumption": round(max(0.0, kwh), 6),
+                        "cost": round(max(0.0, kwh) * avg_price_per_kwh, 2),
+                    }
+                )
+                current_ts += interval_ms
 
             # If upstream telemetry is unavailable, keep backward-compatible fallback.
             if not response_data:
