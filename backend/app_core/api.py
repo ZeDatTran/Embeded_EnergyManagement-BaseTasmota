@@ -2225,6 +2225,29 @@ def register_routes(app, socketio):
                     except Exception as e:
                         logging.warning("Energy summary (day) skipped device %s due to error: %s", device_id, e)
 
+                # Fallback: if ENERGY-Total delta returned 0, use ENERGY-Today latest values
+                # ENERGY-Today is a built-in daily counter from Tasmota, always available for active devices
+                if total_kwh <= 0:
+                    logging.info("ENERGY-Total delta returned 0, falling back to ENERGY-Today latest values")
+                    for device_id in device_ids:
+                        try:
+                            url = f"{shared.CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/values/timeseries"
+                            params = {
+                                "keys": "ENERGY-Today",
+                                "limit": 1,
+                            }
+                            resp = requests.get(url, headers=shared.HEADERS, params=params, timeout=10)
+                            resp.raise_for_status()
+                            raw = resp.json()
+                            entries = raw.get("ENERGY-Today", [])
+                            if entries and isinstance(entries, list) and len(entries) > 0:
+                                val = float(entries[0].get("value") or 0.0)
+                                if val > 0:
+                                    total_kwh += val
+                                    logging.info(f"Device {device_id} ENERGY-Today fallback: {val:.4f} kWh")
+                        except Exception as e:
+                            logging.warning("Energy summary (day) ENERGY-Today fallback skipped device %s: %s", device_id, e)
+
             else:
                 # For 'month': Calculate from daily power data to be consistent with chart and user filtering
                 now = datetime.now()

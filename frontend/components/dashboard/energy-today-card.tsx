@@ -13,7 +13,18 @@ function formatCurrency(value: number): string {
   }).format(value);
 }
 
-export function EnergyTodayCard() {
+// Simplified Vietnam electricity cost estimate (tier 1 rate)
+function estimateCost(kwh: number): number {
+  if (kwh <= 0) return 0;
+  // Use average residential rate ~2,000 VND/kWh as a rough estimate for small daily values
+  return kwh * 2000;
+}
+
+interface EnergyTodayCardProps {
+  realtimeEnergyToday?: number;
+}
+
+export function EnergyTodayCard({ realtimeEnergyToday }: EnergyTodayCardProps) {
   const [summary, setSummary] = useState<EnergySummaryData | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -54,8 +65,13 @@ export function EnergyTodayCard() {
     );
   }
 
-  const consumption = summary?.totalConsumption ?? 0;
-  const cost = summary?.totalCost ?? 0;
+  // Use API data first; if API returns 0 but realtime device data is available, use that
+  const apiConsumption = summary?.totalConsumption ?? 0;
+  const apiCost = summary?.totalCost ?? 0;
+
+  // Realtime data from devices is often more accurate for "today" because it tracks exact device state
+  const consumption = Math.max(apiConsumption, realtimeEnergyToday ?? 0);
+  const cost = consumption === apiConsumption && apiCost > 0 ? apiCost : estimateCost(consumption);
 
   return (
     <Card className="overflow-hidden h-full">

@@ -137,3 +137,7 @@ Thumbs.db
 # Windows
 $RECYCLE.BIN/
 ehthumbs.db
+
+*.tsv
+
+*.pkl

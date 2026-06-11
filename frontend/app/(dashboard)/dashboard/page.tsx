@@ -226,7 +226,7 @@ export default function DashboardPage() {
           <UpcomingSchedules />
         </div>
         <div>
-          <EnergyTodayCard />
+          <EnergyTodayCard realtimeEnergyToday={totalEnergyToday} />
         </div>
       </div>
 

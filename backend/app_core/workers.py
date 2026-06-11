@@ -196,6 +196,12 @@ def start_websocket(socketio):
                     if key in telemetry_data
                 }
                 if telemetry_keys_found:
+                    prev_current = None
+                    if "ENERGY-Current" in telemetry_keys_found:
+                        existing_current = shared.latest_data[device_id]["telemetry"].get("ENERGY-Current")
+                        if existing_current is not None:
+                            prev_current = float(existing_current)
+                            
                     shared.latest_data[device_id]["telemetry"].update(telemetry_keys_found)
                     logging.info("Real-time telemetry for %s: %s", device_id, telemetry_keys_found)
 
@@ -208,26 +214,31 @@ def start_websocket(socketio):
                             threshold = cb_config.get("overcurrent_threshold", 20.0)
                             device_user_id = cb_config.get("user_id")
 
-                            if current_val > threshold:
+                            is_over_threshold = current_val > threshold
+                            delta_i = (current_val - prev_current) if prev_current is not None else 0
+                            is_delta_shutdown = delta_i > 8
+
+                            if is_over_threshold or is_delta_shutdown:
+                                reason_msg = f"vượt ngưỡng {threshold}A" if is_over_threshold else f"tăng đột biến {delta_i:.2f}A so với trước đó (> 8A)"
                                 msg = {
                                     "level": "DANGER",
                                     "device_id": device_id,
                                     "current": current_val,
                                     "threshold": threshold,
                                     "message": (
-                                        f"{display_name} (Dòng {current_val}A) "
-                                        f"vượt ngưỡng {threshold}A."
+                                        f"{display_name} (Dòng hiện tại: {current_val}A) "
+                                        f"{reason_msg}."
                                     ),
                                 }
                                 if device_user_id:
                                     socketio.emit("alert_trigger", msg, room=f"user_{device_user_id}_dashboard")
 
                                 try:
+                                    reason_log = f"Current: {current_val}A > Threshold: {threshold}A" if is_over_threshold else f"Delta I: {delta_i:.2f}A > 8A"
                                     logging.warning(
-                                        "Auto-shutdown: %s (Current: %sA > Threshold: %sA)",
+                                        "Auto-shutdown: %s (%s)",
                                         display_name,
-                                        current_val,
-                                        threshold,
+                                        reason_log,
                                     )
                                     success, result = shared.send_rpc_to_device(device_id, "OFF")
                                     if success:
