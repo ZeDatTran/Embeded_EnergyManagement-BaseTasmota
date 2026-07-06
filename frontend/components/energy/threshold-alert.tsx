@@ -16,32 +16,75 @@ interface ThresholdAlertProps {
   currentAmps: number
   // Tên thiết bị đang hiển thị
   deviceName: string
+  // ID thiết bị
+  deviceId?: string
+  // Ngưỡng quá dòng được lưu trong DB
+  overcurrentThreshold?: number
+  // Trạng thái bật tắt bảo vệ quá dòng được lưu trong DB
+  overcurrentEnabled?: boolean
 }
 
-export function ThresholdAlert({ currentAmps, deviceName }: ThresholdAlertProps) {
-  const [enabled, setEnabled] = useState(true)
-  const [threshold, setThreshold] = useState("0.5")
+export function ThresholdAlert({
+  currentAmps,
+  deviceName,
+  deviceId,
+  overcurrentThreshold,
+  overcurrentEnabled,
+}: ThresholdAlertProps) {
+  const [enabled, setEnabled] = useState(false)
+  const [threshold, setThreshold] = useState("20")
   const [isEditing, setIsEditing] = useState(false)
   const { socket, isConnected } = useSocket()
   const { toast } = useToast()
 
   const thresholdValue = Number.parseFloat(threshold) || 0
-  const percentage = thresholdValue >= 0 && !isNaN(thresholdValue) ? (currentAmps / thresholdValue) * 100 : 0
-  const isOverThreshold = !isNaN(thresholdValue) && currentAmps >= thresholdValue
+  const percentage = thresholdValue > 0 ? (currentAmps / thresholdValue) * 100 : 0
+  const isOverThreshold = thresholdValue > 0 && currentAmps >= thresholdValue
 
-  // Khi component mount, lấy từ LocalStorage ra
+  // Sync state with incoming DB values from parent Component
   useEffect(() => {
-    const savedThreshold = localStorage.getItem(`threshold`)
-    if (savedThreshold) {
-      setThreshold(savedThreshold)
+    if (!isEditing && overcurrentThreshold !== undefined) {
+      setThreshold(overcurrentThreshold.toString())
     }
-  }, [deviceName])
+  }, [deviceId, overcurrentThreshold])
 
-  const handleSaveThreshold = () => {
+  useEffect(() => {
+    if (overcurrentEnabled !== undefined) {
+      setEnabled(overcurrentEnabled)
+    }
+  }, [deviceId, overcurrentEnabled])
+
+  const handleToggle = (checked: boolean) => {
+    setEnabled(checked)
     if (!socket || !isConnected) {
       toast({
         title: "Lỗi kết nối",
-        description: "Không thể kết nối đến server",
+        description: "Không thể kết nối để bật/tắt thiết lập",
+        variant: "destructive",
+      })
+      return
+    }
+
+    if (!deviceId) return
+
+    // Chỉ gửi trạng thái enabled, KHÔNG gửi threshold
+    // Backend sẽ giữ nguyên threshold đang lưu trong DB
+    socket.emit("set_alert_threshold", {
+      deviceId,
+      enabled: checked,
+    })
+
+    toast({
+      title: checked ? "Đã bật bảo vệ quá dòng" : "Đã tắt bảo vệ quá dòng",
+      description: `Thiết bị: ${deviceName}`,
+    })
+  }
+
+  const handleSaveThreshold = () => {
+    if (!socket || !isConnected || !deviceId) {
+      toast({
+        title: "Lỗi kết nối",
+        description: "Không thể lưu thiết lập",
         variant: "destructive",
       })
       return
@@ -57,15 +100,16 @@ export function ThresholdAlert({ currentAmps, deviceName }: ThresholdAlertProps)
       return
     }
 
-    // Gửi ngưỡng lên Backend qua Socket
-    socket.emit("set_alert_threshold", { threshold: value })
-
-    // Lưu vào LocalStorage
-    localStorage.setItem(`threshold`, value.toString())
+    // Gửi cả ngưỡng và trạng thái lên Backend qua Socket để lưu vào DB
+    socket.emit("set_alert_threshold", {
+      deviceId,
+      threshold: value,
+      enabled: enabled,
+    })
 
     toast({
-      title: "Đã lưu ngưỡng",
-      description: `Ngưỡng cảnh báo: ${value}A`,
+      title: "Đã lưu cấu hình",
+      description: `Ngưỡng: ${value}A cho ${deviceName}`,
     })
 
     setIsEditing(false)
@@ -88,7 +132,7 @@ export function ThresholdAlert({ currentAmps, deviceName }: ThresholdAlertProps)
                 Offline
               </span>
             )}
-            <Switch checked={enabled} onCheckedChange={setEnabled} />
+            <Switch checked={enabled} onCheckedChange={handleToggle} disabled={!isConnected || !deviceId} />
           </div>
         </div>
         {deviceName && (

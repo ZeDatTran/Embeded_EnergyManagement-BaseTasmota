@@ -85,6 +85,9 @@ __pycache__/
 dist/
 build/
 
+# Debug & test scripts (local only, không push lên git)
+backend/scripts/debug/
+
 # ============================================================
 # TypeScript
 # ============================================================
@@ -127,6 +130,14 @@ Thumbs.db
 .AppleDouble
 .LSOverride
 
+# run file
+
+*.bat
+
 # Windows
 $RECYCLE.BIN/
 ehthumbs.db
+
+*.tsv
+
+*.pkl

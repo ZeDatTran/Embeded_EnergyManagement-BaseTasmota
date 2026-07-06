@@ -6,11 +6,15 @@ import { Providers } from "@/components/providers";
 const inter = Inter({
   subsets: ["latin"],
   variable: "--font-inter",
+  display: "swap",
+  preload: false,
 });
 
 const robotoMono = Roboto_Mono({
   subsets: ["latin"],
   variable: "--font-roboto-mono",
+  display: "swap",
+  preload: false,
 });
 
 export const metadata = {

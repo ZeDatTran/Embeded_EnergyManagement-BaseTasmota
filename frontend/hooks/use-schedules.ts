@@ -1,4 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
+import { getAuthHeaders } from "@/lib/api"
+
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000"
 
 export interface Schedule {
   id: string
@@ -8,18 +11,58 @@ export interface Schedule {
   time: string
   days: string[]
   enabled: boolean
+  runOnce?: boolean
   createdAt: string
 }
 
-// Note: The Flask backend doesn't have schedule endpoints yet
-// These hooks are placeholders for future schedule management features
+export interface AutoScenarioRequest {
+  lookbackDays?: number
+  maxDevices?: number
+  minSamples?: number
+  autoApply?: boolean
+  deviceIds?: string[]
+}
+
+export interface AutoScenarioResponse {
+  lookbackDays: number
+  autoApply: boolean
+  suggestionCount: number
+  createdSchedulesCount: number
+  suggestions: Array<{
+    deviceId: string
+    deviceName: string
+    days: string[]
+    peaks: Array<{
+      onSchedule: Omit<Schedule, "id" | "createdAt">
+      offSchedule: Omit<Schedule, "id" | "createdAt">
+      analysis: {
+        peakWindow: [number, number]
+        bufferHours: number
+        extendedWindow: [number, number]
+        totalKwhInWindow: number
+      }
+    }>
+    analysis: {
+      samples: number
+      activeHours: number[]
+      dataSource: string
+      lookbackDays: number
+    }
+  }>
+  createdSchedules: Schedule[]
+}
 
 export function useSchedules() {
   return useQuery({
     queryKey: ["schedules"],
     queryFn: async () => {
-      // Placeholder: return empty array until backend schedules API is implemented
-      return [] as Schedule[]
+      const response = await fetch(`${API_BASE_URL}/api/schedules`, {
+        headers: getAuthHeaders(),
+      })
+      if (!response.ok) {
+        throw new Error("Failed to fetch schedules")
+      }
+      return response.json() as Promise<Schedule[]>
     },
   })
 }
@@ -28,9 +71,16 @@ export function useCreateSchedule() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: async (data: Omit<Schedule, "id" | "createdAt">) => {
-      // TODO: Implement schedule creation endpoint
-      console.log("Schedule creation not yet implemented:", data)
-      return data
+      const response = await fetch(`${API_BASE_URL}/api/schedules`, {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify(data),
+      })
+      if (!response.ok) {
+        const error = await response.json()
+        throw new Error(error.message || "Failed to create schedule")
+      }
+      return response.json() as Promise<Schedule>
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["schedules"] })
@@ -42,9 +92,16 @@ export function useUpdateSchedule() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: async (data: Schedule) => {
-      // TODO: Implement schedule update endpoint
-      console.log("Schedule update not yet implemented:", data)
-      return data
+      const response = await fetch(`${API_BASE_URL}/api/schedules/${data.id}`, {
+        method: "PUT",
+        headers: getAuthHeaders(),
+        body: JSON.stringify(data),
+      })
+      if (!response.ok) {
+        const error = await response.json()
+        throw new Error(error.message || "Failed to update schedule")
+      }
+      return response.json() as Promise<Schedule>
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["schedules"] })
@@ -56,9 +113,57 @@ export function useDeleteSchedule() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: async (id: string) => {
-      // TODO: Implement schedule delete endpoint
-      console.log("Schedule deletion not yet implemented:", id)
+      const response = await fetch(`${API_BASE_URL}/api/schedules/${id}`, {
+        method: "DELETE",
+        headers: getAuthHeaders(),
+      })
+      if (!response.ok) {
+        const error = await response.json()
+        throw new Error(error.message || "Failed to delete schedule")
+      }
       return id
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["schedules"] })
+    },
+  })
+}
+
+export function useToggleSchedule() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (id: string) => {
+      const response = await fetch(`${API_BASE_URL}/api/schedules/${id}/toggle`, {
+        method: "POST",
+        headers: getAuthHeaders(),
+      })
+      if (!response.ok) {
+        const error = await response.json()
+        throw new Error(error.message || "Failed to toggle schedule")
+      }
+      return response.json() as Promise<Schedule>
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["schedules"] })
+    },
+  })
+}
+
+export function useGenerateAutoScenarios() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (payload: AutoScenarioRequest = {}) => {
+      const response = await fetch(`${API_BASE_URL}/api/schedules/auto-scenarios`, {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify(payload),
+      })
+
+      const result = await response.json()
+      if (!response.ok) {
+        throw new Error(result.message || "Failed to generate auto scenarios")
+      }
+      return (result.data || {}) as AutoScenarioResponse
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["schedules"] })

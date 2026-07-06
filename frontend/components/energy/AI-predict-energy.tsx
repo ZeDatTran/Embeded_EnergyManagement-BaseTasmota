@@ -2,34 +2,59 @@
 
 import { useEffect, useState } from "react"
 import { Loader2, Zap } from "lucide-react"
+import { useAuth } from "@/context/AuthContext"
 
 // Định nghĩa kiểu dữ liệu trả về từ Server AI
 interface ForecastData {
     tien_can_tra_vnd: number
     tong_kwh_du_doan_duoc: number
     tong_kwh_ca_thang: number
+    kwh_da_tieu_thu_thang_nay?: number
 }
 
-const AI_SERVER_URL = "http://localhost:5000"
+const AI_SERVER_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000"
 const STORAGE_KEY = "ai_forecast_result" // session storage
+const FORECAST_TIMEOUT_MS = 90000
 
 export function AIPredictEnergy() {
     const [forecastData, setForecastData] = useState<ForecastData | null>(null)
     const [isForecasting, setIsForecasting] = useState(false)
     const [forecastStatus, setForecastStatus] = useState<string>("")
+    const { token } = useAuth()
 
-    // Kiểm tra xem trong session có dữ liệu cũ không
+    // Ưu tiên lấy dữ liệu mới nhất từ server; cache chỉ dùng làm fallback.
     useEffect(() => {
-        const saved = sessionStorage.getItem(STORAGE_KEY)
-        if (saved) {
+        const loadLatestSummary = async () => {
             try {
-                setForecastData(JSON.parse(saved))
-                setForecastStatus("Dữ liệu từ lần chạy gần nhất.")
+                if (!token) return;
+                const resSummary = await fetch(`${AI_SERVER_URL}/forecast/summary`, {
+                    headers: { "Authorization": `Bearer ${token}` }
+                })
+                const dataSummary = await resSummary.json()
+
+                if (resSummary.ok && dataSummary.status === "success") {
+                    setForecastData(dataSummary.data)
+                    setForecastStatus("Dữ liệu mới nhất từ server.")
+                    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(dataSummary.data))
+                    return
+                }
             } catch (e) {
-                console.error("Lỗi đọc cache", e)
+                console.error("Lỗi lấy summary mới nhất", e)
+            }
+
+            const saved = sessionStorage.getItem(STORAGE_KEY)
+            if (saved) {
+                try {
+                    setForecastData(JSON.parse(saved))
+                    setForecastStatus("Dữ liệu từ lần chạy gần nhất.")
+                } catch (e) {
+                    console.error("Lỗi đọc cache", e)
+                }
             }
         }
-    }, [])
+
+        loadLatestSummary()
+    }, [token])
 
     const handleRunForecast = async () => {
         setIsForecasting(true)
@@ -37,12 +62,29 @@ export function AIPredictEnergy() {
         setForecastData(null) // Reset giao diện
 
         try {
-            const res = await fetch(`${AI_SERVER_URL}/forecast`)
-            const result = await res.json()
+            const controller = new AbortController()
+            const timeoutId = setTimeout(() => controller.abort(), FORECAST_TIMEOUT_MS)
+
+            const res = await fetch(`${AI_SERVER_URL}/forecast`, {
+                method: "GET",
+                headers: { "Authorization": `Bearer ${token}` },
+                signal: controller.signal,
+            })
+
+            clearTimeout(timeoutId)
+
+            let result: any = null
+            try {
+                result = await res.json()
+            } catch {
+                result = null
+            }
 
             if (res.ok) {
                 // Lấy lại summary chuẩn
-                const resSummary = await fetch(`${AI_SERVER_URL}/forecast/summary`)
+                const resSummary = await fetch(`${AI_SERVER_URL}/forecast/summary`, {
+                    headers: { "Authorization": `Bearer ${token}` }
+                })
                 const dataSummary = await resSummary.json()
 
                 if (dataSummary.status === "success") {
@@ -53,10 +95,15 @@ export function AIPredictEnergy() {
                     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(dataSummary.data))
                 }
             } else {
-                setForecastStatus(`Lỗi: ${result.message}`)
+                const message = result?.message || "Không nhận được phản hồi hợp lệ từ server dự báo."
+                setForecastStatus(`Lỗi: ${message}`)
             }
-        } catch (error) {
-            setForecastStatus("Lỗi kết nối tới Server AI!")
+        } catch (error: any) {
+            if (error?.name === "AbortError") {
+                setForecastStatus("Lỗi: AI Server phản hồi quá chậm (timeout 90s).")
+            } else {
+                setForecastStatus("Lỗi kết nối tới Server AI!")
+            }
         } finally {
             setIsForecasting(false)
         }
@@ -128,6 +175,14 @@ export function AIPredictEnergy() {
                         </span>
                     </div>
                 </div>
+
+                {forecastData && (
+                    <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
+                        Đã tiêu thụ tháng này: {Number(forecastData.kwh_da_tieu_thu_thang_nay || 0).toFixed(2)} kWh | 
+                        Dự báo thêm: {forecastData.tong_kwh_du_doan_duoc.toFixed(2)} kWh | 
+                        Tổng tháng: {forecastData.tong_kwh_ca_thang.toFixed(2)} kWh
+                    </div>
+                )}
             </div>
         </div>
     )

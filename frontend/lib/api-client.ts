@@ -1,4 +1,5 @@
 // API Client for FE-Son - Communicates with Flask Backend
+import { getAuthHeaders } from './api';
 // Base URL for the backend API
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
 
@@ -22,10 +23,20 @@ export interface DeviceTelemetry {
 
 export interface Device {
   type: string;
+  name?: string;
   location: string;
   id: string;
   attributes: DeviceAttributes;
   telemetry: DeviceTelemetry;
+  metadata?: {
+    type?: string;
+    name?: string;
+    location?: string;
+    room_type?: string;
+    room_name?: string;
+    max_load?: number;
+    floor?: number;
+  };
 }
 
 export interface DeviceCheckDataResponse {
@@ -49,11 +60,9 @@ export interface ControlResponse {
  */
 export async function fetchDevices(): Promise<Device[]> {
   try {
-    const response = await fetch(`${API_BASE_URL}/check-data`, {
+    const response = await fetch(`${API_BASE_URL}/api/check-data`, {
       method: 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers: getAuthHeaders(),
     });
 
     if (!response.ok) {
@@ -99,12 +108,10 @@ export async function controlDevice(
 
     try {
       const response = await fetch(
-        `${API_BASE_URL}/control/${deviceId}/${commandLower}`,
+        `${API_BASE_URL}/api/control/${deviceId}/${commandLower}`,
         {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
+          headers: getAuthHeaders(),
           signal: controller.signal,
         }
       );
@@ -155,12 +162,10 @@ export async function controlGroupDevices(
 
     try {
       const response = await fetch(
-        `${API_BASE_URL}/control/group/${commandLower}`,
+        `${API_BASE_URL}/api/control/group/${commandLower}`,
         {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
+          headers: getAuthHeaders(),
           signal: controller.signal,
         }
       );
@@ -196,17 +201,140 @@ export async function controlGroupDevices(
  */
 export async function checkApiHealth(): Promise<boolean> {
   try {
-    const response = await fetch(`${API_BASE_URL}/check-token`, {
+    const response = await fetch(`${API_BASE_URL}/api/check-token`, {
       method: 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers: getAuthHeaders(),
     });
 
     return response.ok;
   } catch (error) {
     console.error('Error checking API health:', error);
     return false;
+  }
+}
+
+/**
+ * Fetch a single device by ID
+ * GET /device/<device_id>
+ */
+export async function fetchDeviceById(deviceId: string): Promise<Device | null> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/device/${deviceId}`, {
+      method: 'GET',
+      headers: getAuthHeaders(),
+    });
+
+    if (!response.ok) {
+      // Fallback: Get all devices and find by ID
+      const devices = await fetchDevices();
+      return devices.find(d => d.id === deviceId) || null;
+    }
+
+    const data = await response.json();
+    return data.device || data;
+  } catch (error) {
+    console.error(`Error fetching device ${deviceId}:`, error);
+    // Fallback: Get all devices and find by ID
+    try {
+      const devices = await fetchDevices();
+      return devices.find(d => d.id === deviceId) || null;
+    } catch {
+      return null;
+    }
+  }
+}
+
+/**
+ * Device history data point
+ */
+export interface DeviceHistoryPoint {
+  timestamp: string;
+  power: number;
+  voltage: number;
+  current: number;
+  energy: number;
+}
+
+export interface DeviceHistoryFetchOptions {
+  pageSize?: number;
+  chunkDays?: number;
+  startTs?: number;
+  maxPages?: number;
+}
+
+/**
+ * Fetch device history data for charts.
+ * - day/week/month -> GET /device/<device_id>/history?period=<period>
+ * - all -> GET /device/<device_id>/history/full with cursor pagination
+ */
+export async function fetchDeviceHistory(
+  deviceId: string,
+  period: string = 'day',
+  options: DeviceHistoryFetchOptions = {}
+): Promise<DeviceHistoryPoint[]> {
+  const normalizedPeriod = (period || 'day').toLowerCase();
+
+  try {
+    if (normalizedPeriod === 'all') {
+      const pageSize = Math.max(1, Math.min(options.pageSize ?? 5000, 20000));
+      const chunkDays = Math.max(1, options.chunkDays ?? 3);
+      const maxPages = Math.max(1, options.maxPages ?? 50);
+
+      let cursor: number | undefined = options.startTs;
+      let hasMore = true;
+      let pageCount = 0;
+      const allPoints: DeviceHistoryPoint[] = [];
+
+      while (hasMore && pageCount < maxPages) {
+        const params = new URLSearchParams();
+        params.set('pageSize', String(pageSize));
+        params.set('chunkDays', String(chunkDays));
+        if (cursor !== undefined) {
+          params.set('cursor', String(cursor));
+        }
+
+        const response = await fetch(
+          `${API_BASE_URL}/api/device/${deviceId}/history/full?${params.toString()}`,
+          {
+            method: 'GET',
+            headers: getAuthHeaders(),
+          }
+        );
+
+        if (!response.ok) {
+          throw new Error(`Failed to fetch full history: ${response.status}`);
+        }
+
+        const data = await response.json();
+        const pagePoints = (data?.history || []) as DeviceHistoryPoint[];
+        allPoints.push(...pagePoints);
+
+        hasMore = Boolean(data?.hasMore);
+        cursor = typeof data?.nextCursor === 'number' ? data.nextCursor : undefined;
+        pageCount += 1;
+
+        if (hasMore && cursor === undefined) {
+          break;
+        }
+      }
+
+      return allPoints;
+    }
+
+    const response = await fetch(`${API_BASE_URL}/api/device/${deviceId}/history?period=${normalizedPeriod}`, {
+      method: 'GET',
+      headers: getAuthHeaders(),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to fetch history: ${response.status}`);
+    }
+
+    const data = await response.json();
+    return (data?.history || []) as DeviceHistoryPoint[];
+  } catch (error) {
+    console.error(`Error fetching device history for ${deviceId}:`, error);
+    return [];
   }
 }
 

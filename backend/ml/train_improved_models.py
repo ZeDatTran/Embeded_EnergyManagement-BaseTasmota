@@ -1,0 +1,532 @@
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error, r2_score
+import xgboost as xgb
+try:
+    from catboost import CatBoostRegressor
+    HAS_CATBOOST = True
+except Exception:
+    HAS_CATBOOST = False
+import joblib
+import os
+import sys
+from pathlib import Path
+from datetime import datetime, timedelta
+import warnings
+
+warnings.filterwarnings('ignore')
+
+import requests
+from dotenv import load_dotenv
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from database import get_all_history, list_plug_hourly_energy, list_users
+
+BASE_DIR = Path(__file__).resolve().parent
+DB_PATH = ROOT_DIR / "data" / "power_history.db"
+UCI_DATA_PATH = ROOT_DIR / "household_power_consumption.txt"
+SCALER_IMPROVED_PATH = ROOT_DIR / "scaler_improved.pkl"
+MODELS_DIR = ROOT_DIR / "models"
+
+load_dotenv(ROOT_DIR / ".env")
+CORE_IOT_URL = os.getenv("CORE_IOT_URL", "https://app.coreiot.io")
+JWT_TOKEN = os.getenv("JWT_TOKEN")
+GROUP_ID = os.getenv("GROUP_ID")
+HEADERS = {"Authorization": f"Bearer {JWT_TOKEN}"} if JWT_TOKEN else {}
+
+def create_advanced_features(df):
+    """
+    Enhanced feature engineering with more sophisticated time series features.
+    Adapts lag/rolling window sizes based on available data to avoid losing
+    too many rows and degrading model quality on short histories.
+    """
+    df = df.copy()
+    n_hours = len(df)
+
+    # ===== EXPLICIT LINEAR TREND LAYER =====
+    df['time_idx'] = np.arange(n_hours, dtype=float)
+    if n_hours >= 2:
+        trend_slope, trend_intercept = np.polyfit(df['time_idx'], df['kwh_hour'].astype(float), 1)
+    elif n_hours == 1:
+        trend_slope, trend_intercept = 0.0, float(df['kwh_hour'].iloc[0])
+    else:
+        trend_slope, trend_intercept = 0.0, 0.0
+
+    df['linear_trend'] = trend_slope * df['time_idx'] + trend_intercept
+    df['kwh_detrended'] = df['kwh_hour'] - df['linear_trend']
+    df['trend_slope'] = trend_slope
+
+    # ===== TEMPORAL FEATURES =====
+    df['hour'] = df.index.hour
+    df['dayofweek'] = df.index.dayofweek
+    df['month'] = df.index.month
+    df['is_weekend'] = (df.index.dayofweek >= 5).astype(int)
+    df['quarter'] = df.index.quarter
+    df['is_holiday_period'] = df['month'].isin([1, 12]).astype(int)
+
+    # ===== CYCLIC ENCODING for hour (avoids ordinal artifact 23->0 gap) =====
+    df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
+    df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
+    df['dow_sin'] = np.sin(2 * np.pi * df['dayofweek'] / 7)
+    df['dow_cos'] = np.cos(2 * np.pi * df['dayofweek'] / 7)
+
+    # ===== LAG FEATURES — adaptive based on data length =====
+    # Always safe: 1h and 24h lags
+    df['kwh_lag_1h'] = df['kwh_hour'].shift(1)
+    df['kwh_lag_24h'] = df['kwh_hour'].shift(24)
+    df['kwh_lag_48h'] = df['kwh_hour'].shift(48)
+
+    # 168h (1-week) lag only when history is long enough that dropna keeps >=60% of rows.
+    # A 168h lag + 48h rolling window costs ~216 leading rows; on 735h that's 29% waste.
+    # Require >=800h (≈33 days) before enabling 1-week lags.
+    use_week_lag = n_hours >= 800
+    if use_week_lag:
+        df['kwh_lag_168h'] = df['kwh_hour'].shift(168)
+        long_lag_hours = 336 if n_hours >= 700 else 168
+        df['kwh_lag_336h'] = df['kwh_hour'].shift(long_lag_hours)
+        if df['kwh_lag_336h'].isna().all():
+            df['kwh_lag_336h'] = df['kwh_lag_168h']
+    else:
+        # Short dataset: use 48h as the longest lag to preserve more samples
+        df['kwh_lag_168h'] = df['kwh_hour'].shift(48)   # proxy 48h
+        df['kwh_lag_336h'] = df['kwh_hour'].shift(48)
+
+    # ===== ROLLING STATISTICS =====
+    # Use smaller windows when dataset is short to avoid eating samples
+    roll_windows = [6, 24, 48] if n_hours >= 500 else [6, 12, 24]
+    for window in roll_windows:
+        df[f'kwh_rolling_mean_{window}h'] = df['kwh_hour'].shift(1).rolling(window=window, min_periods=max(1, window//2)).mean()
+        df[f'kwh_rolling_std_{window}h']  = df['kwh_hour'].shift(1).rolling(window=window, min_periods=max(1, window//2)).std()
+        df[f'kwh_rolling_min_{window}h']  = df['kwh_hour'].shift(1).rolling(window=window, min_periods=max(1, window//2)).min()
+        df[f'kwh_rolling_max_{window}h']  = df['kwh_hour'].shift(1).rolling(window=window, min_periods=max(1, window//2)).max()
+
+    # Rename columns to fixed names so downstream code always finds them
+    for alias_from, alias_to in [
+        (f'kwh_rolling_mean_{roll_windows[-1]}h', 'kwh_rolling_mean_48h'),
+        (f'kwh_rolling_std_{roll_windows[-1]}h',  'kwh_rolling_std_48h'),
+        (f'kwh_rolling_min_{roll_windows[-1]}h',  'kwh_rolling_min_48h'),
+        (f'kwh_rolling_max_{roll_windows[-1]}h',  'kwh_rolling_max_48h'),
+    ]:
+        if alias_from != alias_to and alias_from in df.columns:
+            df[alias_to] = df[alias_from]
+
+    # ===== TREND FEATURES =====
+    df['kwh_trend_24h'] = (df['kwh_hour'].shift(24) - df['kwh_hour'].shift(48)) / (df['kwh_hour'].shift(48) + 0.01)
+    if use_week_lag:
+        df['kwh_trend_168h'] = (df['kwh_lag_168h'] - df['kwh_lag_336h']) / (df['kwh_lag_336h'] + 0.01)
+    else:
+        df['kwh_trend_168h'] = df['kwh_trend_24h']  # reuse 24h trend as proxy
+
+    # ===== DETRENDED LAG FEATURES =====
+    df['kwh_detrended_lag_24h'] = df['kwh_detrended'].shift(24)
+    if use_week_lag:
+        df['kwh_detrended_lag_168h'] = df['kwh_detrended'].shift(168)
+        df['kwh_detrended_roll_mean_24h'] = df['kwh_detrended'].shift(24).rolling(window=24, min_periods=12).mean()
+        df['kwh_detrended_roll_std_24h']  = df['kwh_detrended'].shift(24).rolling(window=24, min_periods=12).std()
+    else:
+        df['kwh_detrended_lag_168h'] = df['kwh_detrended'].shift(48)
+        df['kwh_detrended_roll_mean_24h'] = df['kwh_detrended'].shift(1).rolling(window=12, min_periods=6).mean()
+        df['kwh_detrended_roll_std_24h']  = df['kwh_detrended'].shift(1).rolling(window=12, min_periods=6).std()
+
+    # ===== INTERACTION FEATURES =====
+    df['hour_kwh_interaction'] = df['hour'] * df['kwh_lag_24h']
+    df['daytype_kwh_interaction'] = df['is_weekend'] * df['kwh_lag_24h']
+
+    return df.dropna()
+
+
+def fetch_coreiot_history_df(lookback_days: int = 60, chunk_days: int = 7) -> pd.DataFrame:
+    """Fetch hourly energy history from CoreIoT"""
+    if not JWT_TOKEN:
+        print("[WARN] JWT_TOKEN missing - using UCI fallback")
+        return pd.DataFrame(columns=["kwh_hour"])
+
+    # --- MULTI-TENANT FETCH ---
+    # Collect all unique group IDs from all registered users
+    all_group_ids = set()
+    if GROUP_ID:
+        all_group_ids.add(GROUP_ID)
+    
+    try:
+        users = list_users()
+        for user in users:
+            gid = (user.get("coreiot_config") or {}).get("group_id")
+            if gid:
+                all_group_ids.add(gid)
+    except Exception as e:
+        print(f"[WARN] Failed to list users for group discovery: {e}")
+
+    if not all_group_ids:
+        print("[INFO] No group IDs found (global or per-user). Relying on local DB history.")
+        return pd.DataFrame(columns=["kwh_hour"])
+
+    print(f"[INFO] Scanning {len(all_group_ids)} user group(s) on CoreIoT...")
+    device_ids = set()
+    
+    for gid in all_group_ids:
+        try:
+            url = f"{CORE_IOT_URL}/api/entityGroup/{gid}/entities?pageSize=100&page=0&entityType=DEVICE"
+            resp = requests.get(url, headers=HEADERS, timeout=15)
+            resp.raise_for_status()
+            payload = resp.json()
+            
+            entities = []
+            if isinstance(payload, dict): entities = payload.get("data", [])
+            elif isinstance(payload, list): entities = payload
+            
+            for ent in entities:
+                did = None
+                if isinstance(ent.get("id"), dict): did = ent["id"].get("id")
+                elif isinstance(ent.get("entityId"), dict): did = ent["entityId"].get("id")
+                else: did = ent.get("id")
+                if did: device_ids.add(did)
+        except Exception as e:
+            print(f"[WARN] Failed to fetch devices for group {gid}: {e}")
+
+    if not device_ids:
+        print("[INFO] No devices found in any group. Relying on local DB history.")
+        return pd.DataFrame(columns=["kwh_hour"])
+
+    print(f"[INFO] Found {len(device_ids)} total device(s) to scan.")
+
+    end_dt = datetime.now()
+    start_dt = end_dt - timedelta(days=max(1, lookback_days))
+    chunk_delta = timedelta(days=max(1, chunk_days))
+    power_by_hour: dict[str, float] = {}
+
+    for device_id in device_ids:
+        cursor = start_dt
+        while cursor < end_dt:
+            chunk_end = min(cursor + chunk_delta, end_dt)
+            start_ts = int(cursor.timestamp() * 1000)
+            end_ts = int(chunk_end.timestamp() * 1000)
+
+            url = f"{CORE_IOT_URL}/api/plugins/telemetry/DEVICE/{device_id}/values/timeseries"
+            params = {
+                "keys": "ENERGY-Power",
+                "startTs": start_ts,
+                "endTs": end_ts,
+                "limit": 10000,
+                "agg": "AVG",
+                "interval": 3600000,
+            }
+            try:
+                resp = requests.get(url, headers=HEADERS, params=params, timeout=25)
+                resp.raise_for_status()
+                raw = resp.json()
+
+                for entry in raw.get("ENERGY-Power", []):
+                    ts_ms = entry.get("ts")
+                    val = entry.get("value")
+                    if ts_ms is None:
+                        continue
+                    try:
+                        power_w = float(val or 0.0)
+                    except (TypeError, ValueError):
+                        continue
+                    hour_key = datetime.fromtimestamp(ts_ms / 1000).strftime("%Y-%m-%dT%H:00:00")
+                    power_by_hour[hour_key] = power_by_hour.get(hour_key, 0.0) + max(0.0, power_w)
+            except Exception as e:
+                print(f"[WARN] Failed to fetch telemetry for device {device_id}: {e}")
+
+            cursor = chunk_end
+
+    if not power_by_hour:
+        return pd.DataFrame(columns=["kwh_hour"])
+
+    rows = []
+    for hour_key, total_power_w in power_by_hour.items():
+        rows.append({"datetime": hour_key, "kwh_hour": round(total_power_w / 1000.0, 6)})
+
+    df = pd.DataFrame(rows)
+    df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
+    df = df.dropna(subset=["datetime"]).set_index("datetime").sort_index()
+    return df
+
+
+
+
+def load_data_for_training():
+    """Load training data with priority: CoreIoT > Personal DB > UCI"""
+    
+    min_required_hours = 240
+    
+    # Try CoreIoT first
+    df = pd.DataFrame(columns=["kwh_hour"])
+    try:
+        lookback_days = int(os.getenv("COREIOT_LOOKBACK_DAYS", "60"))
+    except ValueError:
+        lookback_days = 60
+    
+    df = fetch_coreiot_history_df(lookback_days=lookback_days)
+    if len(df) >= min_required_hours:
+        print(f"[INFO] Using CoreIoT data: {len(df)} hourly points")
+        return df
+    
+    # Try personal DB
+    if DB_PATH.exists():
+        try:
+            history = get_all_history()
+            plug_rows = list_plug_hourly_energy()
+            
+            hour_totals = {}
+            for row in plug_rows:
+                hour_bucket = row.get("hour_bucket")
+                if not hour_bucket:
+                    continue
+                try:
+                    kwh_val = float(row.get("energy_kwh") or 0.0)
+                except (TypeError, ValueError):
+                    continue
+                hour_totals[hour_bucket] = hour_totals.get(hour_bucket, 0.0) + max(0.0, kwh_val)
+            
+            merged_history = dict(history)
+            for ts, total_kwh in hour_totals.items():
+                merged_history[ts] = round(total_kwh, 6)
+            
+            if merged_history:
+                df = pd.DataFrame([{"datetime": k, "kwh_hour": v} for k, v in merged_history.items()])
+                df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
+                df = df.dropna(subset=["datetime"])
+                df = df.set_index("datetime").sort_index()
+                
+                if len(df) >= min_required_hours:
+                    print(f"[INFO] Using Personal DB data: {len(df)} hourly points")
+                    return df
+        except Exception as e:
+            print(f"[WARN] Personal DB failed: {e}")
+    
+    # Fallback to UCI
+    print("[INFO] Using UCI dataset (household_power_consumption.txt)")
+    path = UCI_DATA_PATH
+    if not path.exists():
+        raise FileNotFoundError("Need household_power_consumption.txt")
+    
+    df_raw = pd.read_csv(path, sep=';', na_values=['?'], low_memory=False)
+    df_raw['datetime'] = pd.to_datetime(df_raw['Date'] + ' ' + df_raw['Time'], dayfirst=True)
+    df_raw = df_raw.set_index('datetime').ffill()
+    df_hourly = df_raw['Global_active_power'].astype(float).resample('h').mean()
+    df = df_hourly.to_frame(name='kwh_hour')
+    
+    return df
+
+
+def train_improved_models():
+    """Train improved models with better features and parameters"""
+    
+    # Load data
+    df = load_data_for_training()
+    print(f"\nData shape: {df.shape}")
+    total_hours = len(df)
+    
+    # Create advanced features
+    print("\n[STEP] Creating advanced features...")
+    df_features = create_advanced_features(df)
+    print(f"[OK] Features created. Shape: {df_features.shape}")
+
+    if len(df_features) < 5:
+        raise ValueError(
+            f"Not enough training samples after feature engineering ({len(df_features)}). "
+            "Increase COREIOT_LOOKBACK_DAYS or ensure denser telemetry."
+        )
+    
+    # Exclude target and absolute time features
+    FEATURES = [
+        col for col in df_features.columns
+        if col not in {'kwh_hour', 'kwh_detrended', 'time_idx', 'linear_trend', 'trend_slope'}
+    ]
+    TARGET = 'kwh_hour'
+    
+    X = df_features[FEATURES]
+    y = df_features[TARGET]
+    
+    # Scale features
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    # Keep a dedicated scaler for the improved feature set.
+    joblib.dump(scaler, SCALER_IMPROVED_PATH)
+    
+    # Train-test split
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_scaled, y, test_size=0.15, shuffle=False
+    )
+    
+    os.makedirs(MODELS_DIR, exist_ok=True)
+    
+    print("\n" + "="*60)
+    print("TRAINING IMPROVED MODELS WITH ADVANCED FEATURES")
+    print("="*60)
+    
+    scores = {}
+    
+    # [1] XGBoost — reduced depth + lighter regularization to balance under/overfit
+    print("\n  [1/3] Training XGBoost (Tuned)...")
+    xgb_params_primary = {
+        "n_estimators": 500,
+        "learning_rate": 0.03,
+        "max_depth": 4,           # was 6 → shallower trees generalise better on small data
+        "min_child_weight": 3,    # was 2 → require more samples per leaf
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+        "colsample_bylevel": 0.7,
+        "gamma": 0.05,            # was 0.001 → prune splits with small gain
+        "reg_alpha": 0.05,        # was 0.01 → mild L1
+        "reg_lambda": 2.0,        # was 1 → stronger L2 weight decay
+        "objective": "reg:squarederror",
+        "eval_metric": "rmse",
+        "random_state": 42,
+        "n_jobs": -1,
+        "verbosity": 0,
+        "early_stopping_rounds": 50,
+    }
+    model_xgb = xgb.XGBRegressor(**xgb_params_primary)
+    model_xgb.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
+
+    y_pred_xgb_train = model_xgb.predict(X_train)
+    y_pred_xgb_test  = model_xgb.predict(X_test)
+    xgb_train_r2 = r2_score(y_train, y_pred_xgb_train)
+    xgb_test_r2  = r2_score(y_test,  y_pred_xgb_test)
+    xgb_pred_std = float(np.std(y_pred_xgb_test))
+
+    # Retry if predictions collapse to near-constant OR test R² is significantly negative
+    if xgb_pred_std < 1e-6 or xgb_test_r2 < -0.3:
+        print("     XGBoost underfit/collapsed → retry with relaxed params...")
+        xgb_params_fallback = {
+            "n_estimators": 700,
+            "learning_rate": 0.02,
+            "max_depth": 5,
+            "min_child_weight": 2,
+            "subsample": 0.9,
+            "colsample_bytree": 0.9,
+            "gamma": 0,
+            "reg_alpha": 0.01,
+            "reg_lambda": 1,
+            "objective": "reg:squarederror",
+            "eval_metric": "rmse",
+            "random_state": 42,
+            "n_jobs": -1,
+            "verbosity": 0,
+            "early_stopping_rounds": 30,
+        }
+        model_xgb = xgb.XGBRegressor(**xgb_params_fallback)
+        model_xgb.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
+        y_pred_xgb_train = model_xgb.predict(X_train)
+        y_pred_xgb_test  = model_xgb.predict(X_test)
+        xgb_train_r2 = r2_score(y_train, y_pred_xgb_train)
+        xgb_test_r2  = r2_score(y_test,  y_pred_xgb_test)
+
+    joblib.dump(model_xgb, MODELS_DIR / "model_xgb_improved.pkl")
+    scores['XGBoost'] = {
+        'train': xgb_train_r2,
+        'test':  xgb_test_r2,
+        'rmse':  np.sqrt(mean_squared_error(y_test, y_pred_xgb_test))
+    }
+    print(f"     Train R²: {scores['XGBoost']['train']:.4f} | Test R²: {scores['XGBoost']['test']:.4f}")
+    
+    # [2] Random Forest — reduced depth to fix severe overfitting (was train=0.88, test=-0.92)
+    print("  [2/3] Training Random Forest (Tuned)...")
+    model_rf = RandomForestRegressor(
+        n_estimators=200,
+        max_depth=8,              # was 18 → KEY FIX: shallower trees prevent memorisation
+        min_samples_split=8,      # was 5 → harder to create splits on small leaf sets
+        min_samples_leaf=4,       # was 2 → each leaf needs at least 4 samples
+        max_features=0.5,         # was 'sqrt' → reduce feature set per split further
+        max_samples=0.85,         # Bootstrap sample fraction — adds variance penalty
+        random_state=42,
+        n_jobs=-1,
+        verbose=0
+    )
+    model_rf.fit(X_train, y_train)
+    joblib.dump(model_rf, MODELS_DIR / "model_rf_improved.pkl")
+    y_pred_rf_train = model_rf.predict(X_train)
+    y_pred_rf_test  = model_rf.predict(X_test)
+    scores['RandomForest'] = {
+        'train': r2_score(y_train, y_pred_rf_train),
+        'test':  r2_score(y_test,  y_pred_rf_test),
+        'rmse':  np.sqrt(mean_squared_error(y_test, y_pred_rf_test))
+    }
+    print(f"     Train R²: {scores['RandomForest']['train']:.4f} | Test R²: {scores['RandomForest']['test']:.4f}")
+    
+    # [3] CatBoost - robust on small/medium tabular data
+    print("  [3/3] Training CatBoost...")
+    cat_path = MODELS_DIR / "model_cat_improved.pkl"
+    if HAS_CATBOOST:
+        try:
+            model_cat = CatBoostRegressor(
+                iterations=800,
+                depth=5,              # was 6 → slightly shallower to reduce overfit
+                learning_rate=0.03,
+                l2_leaf_reg=5.0,      # L2 regularisation on leaf values
+                loss_function="RMSE",
+                random_seed=42,
+                verbose=False,
+                early_stopping_rounds=50,
+            )
+            model_cat.fit(X_train, y_train, eval_set=(X_test, y_test), verbose=False)
+            joblib.dump(model_cat, cat_path)
+            y_pred_cat_train = model_cat.predict(X_train)
+            y_pred_cat_test = model_cat.predict(X_test)
+            scores['CatBoost'] = {
+                'train': r2_score(y_train, y_pred_cat_train),
+                'test': r2_score(y_test, y_pred_cat_test),
+                'rmse': np.sqrt(mean_squared_error(y_test, y_pred_cat_test))
+            }
+            print(f"     Train R²: {scores['CatBoost']['train']:.4f} | Test R²: {scores['CatBoost']['test']:.4f}")
+        except Exception as e:
+            if cat_path.exists():
+                cat_path.unlink()
+            print(f"     Skipped CatBoost: training failed ({e})")
+            scores['CatBoost'] = {
+                'train': float('nan'),
+                'test': float('nan'),
+                'rmse': float('nan')
+            }
+    else:
+        if cat_path.exists():
+            cat_path.unlink()
+        print("     Skipped CatBoost: package not installed.")
+        scores['CatBoost'] = {
+            'train': float('nan'),
+            'test': float('nan'),
+            'rmse': float('nan')
+        }
+
+    mlp_path = MODELS_DIR / "model_mlp_improved.pkl"
+    if mlp_path.exists():
+        mlp_path.unlink()
+        print("  Removed stale model_mlp_improved.pkl (MLP disabled).")
+    
+    # Print summary
+    print("\n" + "="*60)
+    print("RESULTS SUMMARY")
+    print("="*60)
+    for model_name, model_scores in scores.items():
+        print(f"\n{model_name}:")
+        print(f"  Train R²: {model_scores['train']:.4f}")
+        print(f"  Test R²:  {model_scores['test']:.4f}")
+        print(f"  RMSE:     {model_scores['rmse']:.6f} kWh")
+    
+    # Feature importance
+    print("\n" + "="*60)
+    print("TOP 10 MOST IMPORTANT FEATURES")
+    print("="*60)
+    xgb_importance = pd.DataFrame({
+        'feature': FEATURES,
+        'importance': model_xgb.feature_importances_
+    }).sort_values('importance', ascending=False).head(10)
+    
+    for idx, row in xgb_importance.iterrows():
+        print(f"  {row['feature']:<30} : {row['importance']:.4f}")
+    
+    print("\n[OK] Improved models saved to " + str(MODELS_DIR))
+    print("[OK] This is the production training pipeline.")
+
+
+if __name__ == "__main__":
+    train_improved_models()

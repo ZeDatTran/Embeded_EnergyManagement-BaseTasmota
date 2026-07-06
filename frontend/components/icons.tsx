@@ -13,6 +13,7 @@ import {
   Zap,
   Settings,
   Home,
+  LogOut,
   Calendar,
   Activity,
   AlertTriangle,
@@ -29,6 +30,16 @@ import {
   BarChart3,
   TrendingUp,
   TrendingDown,
+  CircuitBoard,
+  DoorOpen,
+  Bed,
+  Sofa,
+  UtensilsCrossed,
+  Bath,
+  Building2,
+  ShieldOff,
+  CalendarClock,
+  Banknote,
 } from "lucide-react"
 
 export const Icons = {
@@ -38,6 +49,16 @@ export const Icons = {
   ac: AirVent,
   sensor: Thermometer,
   camera: Camera,
+  
+  // Circuit Breaker / Room types
+  cb: CircuitBoard,
+  circuit_breaker: CircuitBoard,
+  living_room: Sofa,
+  bedroom: Bed,
+  office: Building2,
+  kitchen: UtensilsCrossed,
+  bathroom: Bath,
+  balcony: DoorOpen,
 
   // Status
   power: Power,
@@ -62,6 +83,7 @@ export const Icons = {
   trash: Trash2,
   chevronDown: ChevronDown,
   chevronRight: ChevronRight,
+  logout: LogOut,
 
   // Alerts
   warning: AlertTriangle,
@@ -73,4 +95,9 @@ export const Icons = {
   chart: BarChart3,
   trendingUp: TrendingUp,
   trendingDown: TrendingDown,
+
+  // Dashboard
+  shieldOff: ShieldOff,
+  calendarClock: CalendarClock,
+  banknote: Banknote,
 }
